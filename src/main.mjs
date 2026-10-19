@@ -89,7 +89,7 @@ else {
       const value = process.argv.find(argument => argument.startsWith(flag));
       if (value) settings[key] = value.slice(flag.length);
     }
-    window = new BrowserWindow({ width: 1060, height: 860, minWidth: 860, minHeight: 700, backgroundColor: '#101812',
+    window = new BrowserWindow({ width: 1060, height: 860, minWidth: 860, minHeight: 700, backgroundColor: '#16203a',
       webPreferences: { preload: path.join(here, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
     window.on('close', event => {
       if (busy && dialog.showMessageBoxSync(window, { type: 'warning', title: 'File operation in progress',

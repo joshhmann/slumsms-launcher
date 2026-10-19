@@ -3,24 +3,30 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
     <meta name="color-scheme" content="dark">
     <title>SlumsMS Launcher</title>
     <link rel="stylesheet" href="./style.css">
     <script type="module" src="./renderer.mjs"></script>
   </head>
   <body>
-    <div class="launcher">
-      <header class="masthead">
+    <header class="scene">
+      <div class="scene-art" aria-hidden="true">
+        <video class="scene-video" src="./assets/henesys.webm" poster="./assets/henesys.png" autoplay muted loop playsinline disablepictureinpicture></video>
+      </div>
+      <div class="masthead">
         <div class="brand">
-          <span class="brand-mark" aria-hidden="true"><span></span></span>
+          <span class="brand-leaf" aria-hidden="true"></span>
           <div><p class="brand-name">SlumsMS</p><p class="brand-caption">GAME LAUNCHER</p></div>
         </div>
         <span class="phase-badge" id="phase-badge" data-phase="idle"><span class="status-dot" aria-hidden="true"></span><span id="phase-label">Starting</span></span>
-      </header>
+      </div>
+    </header>
 
+    <div class="launcher">
       <main>
-        <section class="client-card" aria-labelledby="status-heading">
+        <section class="client-card window" aria-labelledby="status-heading">
+          <p class="window-tab" aria-hidden="true">STATUS</p>
           <div class="client-copy">
             <p class="eyebrow">YOUR NEXT ADVENTURE</p>
             <h1 id="status-heading">Make yourself at home.</h1>
@@ -33,7 +39,8 @@
           </div>
         </section>
 
-        <section class="settings-card" aria-labelledby="settings-heading">
+        <section class="settings-card window" aria-labelledby="settings-heading">
+          <p class="window-tab" aria-hidden="true">SETUP</p>
           <div class="section-heading"><h2 id="settings-heading">Your installation</h2><span class="section-note">Stored on this device</span></div>
           <form id="feed-form">
             <label for="feed-url">Release manifest</label>
