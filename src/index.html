@@ -75,6 +75,17 @@
             <button class="button button-quiet" id="open-folder" type="button">Open folder</button>
           </div>
         </section>
+        <section class="setting" aria-labelledby="access-key-label">
+          <form id="access-key-form">
+            <label id="access-key-label" for="access-key">Access key</label>
+            <p class="field-help" id="access-key-help">Only needed if the update server asks for one.</p>
+            <div class="input-row">
+              <input id="access-key" name="access-key" type="password" placeholder="Enter access key" aria-describedby="access-key-help" autocomplete="off" autocapitalize="off" spellcheck="false" disabled>
+              <button class="button button-secondary" id="save-access-key" type="submit" disabled>Save</button>
+            </div>
+            <button class="link-button" id="clear-access-key" type="button" hidden>Clear saved key</button>
+          </form>
+        </section>
         <section class="setting" aria-labelledby="repair-label">
           <h3 id="repair-label">Repair</h3>
           <p class="field-help">Re-check every game file and download anything missing or damaged.</p>

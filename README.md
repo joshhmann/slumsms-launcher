@@ -80,7 +80,7 @@ Upload new layer version folders completely, then upload/replace `manifest.json`
 `src/launcher.config.json` ships inside the app and sets the defaults:
 
 ```json
-{ "feedUrl": "https://slumspatch.asslorde.com/manifest.json", "clientExecutable": "SlumsMS.exe", "downloadConcurrency": 12 }
+{ "feedUrl": "https://slumspatch.asslorde.com/manifest.json", "clientExecutable": "SlumsMS.exe", "downloadConcurrency": 12, "accessKey": "" }
 ```
 
 `feedUrl` must be HTTPS (HTTP only on localhost for development). `clientExecutable` is the file name used to detect a client shipped next to the launcher; what Play starts comes from the release manifest's `launch` (SlumsMS.exe, which starts MapleStory.exe with slums.dll). `downloadConcurrency` is 1-32. A packaged launcher also reads an optional `launcher.config.json` beside `SlumsMS Launcher.exe`, which overrides the built-in values without a rebuild. The player's own choices in Settings (stored in Electron's per-user `settings.json`) override both; "Reset to default" clears a custom update server.
@@ -90,6 +90,20 @@ The game folder is chosen in this order:
 1. A folder the player picked in Settings.
 2. Bundled: the folder containing the launcher, or its parent, when it contains `clientExecutable`. Ship the launcher in a `Launcher/` subfolder of the client so its runtime files stay out of the client root.
 3. Standalone: `%LOCALAPPDATA%\SlumsMS`, which never needs elevation.
+
+## Access key (friends-only patch server)
+
+The patch server can sit behind HTTP Basic auth (nginx `auth_basic`). The username is always `slums`; the access key is the password. The launcher sends `Authorization: Basic base64("slums:" + key)` on every request to the feed's origin (top-level manifest, layer manifests and files) and nothing else:
+
+- **Origin-bound.** The header is attached only when a request's scheme, host and port equal those of the feed URL. Requests to any other origin never carry it.
+- **Redirects.** Cross-origin redirects are followed but the header is dropped (and stays dropped for the rest of that redirect chain, even if a later hop points back at the feed), so a CDN or any other host never sees the key. HTTPS-only validation is unchanged: HTTPS releases cannot redirect to HTTP.
+- **401/403** from the feed stops the operation immediately (no retries) and shows "This server needs an access key - enter it in Settings"; the main button becomes "Open settings".
+- **Where the key comes from**, highest priority first: (1) the key the player saved in Settings > Access key, stored in Electron's per-user `settings.json` (never in the game folder; written with owner-only permissions where the OS supports it); (2) `accessKey` in `launcher.config.json` (the built-in one, or one beside the exe). The built-in key is used only while the update server is the built-in one, so a custom server never receives it. An empty key sends no header.
+- The key is never logged, never shown, and never sent to the page: the renderer only learns whether a key is saved, built in or absent. "Clear saved key" removes the player's key and falls back to the built-in one, if any.
+
+**How a friend enters the key:** open Settings (gear), type the key under Access key, press Save. The launcher re-checks immediately.
+
+**Building a friends build with the key baked in:** set `"accessKey": "<the key>"` in `src/launcher.config.json`, then run `npm run build:win`. The key is then inside the ZIP (readable by anyone who has it), so share that ZIP only with friends, and do not commit the key: revert `accessKey` to `""` after building. To rotate, change the nginx password, rebuild, and tell friends to update or enter the new key in Settings.
 
 On start the launcher checks the release automatically (fast verify), then shows a single button: Install (no client yet), Update (files changed) or Play (verified). Repair, the game folder and the update server live behind the Settings (gear) button.
 
@@ -153,6 +167,7 @@ The feed is trusted executable-distribution authority. SHA-256 verifies against 
 - Layered-release unit/HTTP tests (`test/layers.test.mjs`): publisher layer/top-level output and immutability; layer override order; only changed layers fetched (unchanged base layer manifest and files not requested); fast verify for unchanged, size change, mtime change, same-size tamper, missing, and the same-size-same-mtime limit caught only by Repair; player-owned config.ini; schemaVersion 1 compatibility; path traversal/reserved-path rejection in manifests, layer manifests and a hosted layer; retry/backoff, byte progress, permanent 404 and resumed install.
 - Scale smoke (not in the suite): 30k-file layer on Linux, fast verify of an unchanged install ~1.2 s vs ~3.8 s full hash of tiny files; state file ~4 MB.
 - Five passing real-HTTP regression scenarios: fresh nested install/unchanged scan/repair with player-file preservation; corrupt payload preventing partial replacement; immutable publication/symlinks/Windows path aliases; redirected feed resolution; optional release news round-trip and rejection. The redirect regression was observed failing before its fix and passing afterward.
+- Access key HTTP tests (`test/access-key.test.mjs`): Basic header on manifest, layer manifests and files; no header with an empty key; header dropped on a cross-origin redirect and not re-attached when the chain bounces back; 401 gives the access-key error with exactly one request (load and mid-install); saved key overrides the built-in one, built-in key only for the built-in feed; config validation.
 - Launcher config unit tests: layered config files, feed URL rules, bundled-client detection beside or above the launcher, and the standalone default folder.
 - Standalone real static publication, download, hash scan and single-file repair smoke.
 - Actual Electron window via a virtual Linux display: Check → update-needed; Install → verified-ready; Play → real throwaway helper process with correct working directory and argument containing a space; invalid feed → displayed404 error → recovery after saving the correct feed.

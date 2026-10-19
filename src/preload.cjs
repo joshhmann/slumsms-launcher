@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('launcher', {
   settings: invoke('settings'),
   saveFeed: invoke('saveFeed'),
   resetFeed: invoke('resetFeed'),
+  saveAccessKey: invoke('saveAccessKey'),
+  clearAccessKey: invoke('clearAccessKey'),
   chooseFolder: invoke('chooseFolder'),
   openFolder: invoke('openFolder'),
   check: invoke('check'),

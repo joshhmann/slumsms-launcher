@@ -1,5 +1,6 @@
 {
   "feedUrl": "https://slumspatch.asslorde.com/manifest.json",
   "clientExecutable": "SlumsMS.exe",
-  "downloadConcurrency": 12
+  "downloadConcurrency": 12,
+  "accessKey": ""
 }

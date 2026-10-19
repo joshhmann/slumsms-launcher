@@ -4,19 +4,23 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { loadRelease, inspectRelease, installRelease } from './updater.mjs';
-import { readLauncherConfig, detectBundledClient, standaloneInstallDir, validateFeedUrl } from './launcher-config.mjs';
+import { readLauncherConfig, detectBundledClient, standaloneInstallDir, validateFeedUrl, validAccessKey, effectiveAccessKey } from './launcher-config.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const page = pathToFileURL(path.join(here, 'index.html')).href;
 let window;
-// settings.json holds only the player's overrides; launcher.config.json supplies the defaults.
-let settings = { feedUrl: '', installDir: '' };
-let config = { feedUrl: '', clientExecutable: '', downloadConcurrency: 12 };
+// settings.json (per-user app data, never the game folder) holds only the player's overrides;
+// launcher.config.json supplies the defaults. The access key never leaves the main process.
+let settings = { feedUrl: '', installDir: '', accessKey: '' };
+let config = { feedUrl: '', clientExecutable: '', downloadConcurrency: 12, accessKey: '' };
 let bundledDir = '';
 let busy = false;
 let state = { phase: 'idle', message: 'Checking for updates…', canPlay: false };
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
 
+function accessKey() {
+  return effectiveAccessKey({ savedKey: settings.accessKey, defaultKey: config.accessKey, feedUrl: settings.feedUrl || config.feedUrl, defaultFeedUrl: config.feedUrl });
+}
 function effective() {
   return {
     feedUrl: settings.feedUrl || config.feedUrl,
@@ -24,6 +28,7 @@ function effective() {
     defaultFeedUrl: config.feedUrl,
     feedOverridden: Boolean(settings.feedUrl),
     installDirSource: settings.installDir ? 'saved' : bundledDir ? 'bundled' : 'default',
+    accessKeySource: settings.accessKey ? 'saved' : accessKey() ? 'built-in' : 'none',
     appVersion: app.getVersion(),
   };
 }
@@ -34,7 +39,7 @@ function send(patch) {
 async function persist() {
   await mkdir(path.dirname(settingsFile()), { recursive: true });
   const temporary = `${settingsFile()}.tmp`;
-  await writeFile(temporary, JSON.stringify(settings, null, 2));
+  await writeFile(temporary, JSON.stringify(settings, null, 2), { mode: 0o600 });
   await rename(temporary, settingsFile());
 }
 function requireSettings() {
@@ -48,9 +53,9 @@ async function exists(file) {
 async function operation(phase, action) {
   if (busy) throw new Error('A launcher operation is already running.');
   busy = true;
-  send({ phase, canPlay: false, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0 });
+  send({ phase, canPlay: false, accessKeyNeeded: false, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0 });
   try { return await action(); }
-  catch (error) { send({ phase: 'error', message: error.message, canPlay: false }); throw error; }
+  catch (error) { send({ phase: 'error', message: error.message, accessKeyNeeded: error.code === 'ACCESS_KEY_REQUIRED', canPlay: false }); throw error; }
   finally { busy = false; }
 }
 // Progress arrives per downloaded chunk; forward at most ~10 updates a second to the page.
@@ -65,7 +70,7 @@ function progress(value) {
 // mode 'fast' trusts files whose size and mtime match the install state; 'full' (Repair) hashes everything.
 async function checkRelease(mode = 'fast') {
   const { feedUrl, installDir } = requireSettings();
-  const release = await loadRelease(feedUrl, { installDir });
+  const release = await loadRelease(feedUrl, { installDir, accessKey: accessKey() });
   send({ version: release.version, news: release.news ?? [], message: 'Verifying installed client files.' });
   const fresh = !(await exists(path.resolve(installDir, ...release.launch.executable.split('/'))));
   const pending = await inspectRelease(installDir, release, progress, { mode });
@@ -114,7 +119,8 @@ else {
   app.whenReady().then(async () => {
     try {
       const saved = JSON.parse(await readFile(settingsFile(), 'utf8'));
-      settings = { feedUrl: typeof saved.feedUrl === 'string' ? saved.feedUrl : '', installDir: typeof saved.installDir === 'string' ? saved.installDir : '' };
+      settings = { feedUrl: typeof saved.feedUrl === 'string' ? saved.feedUrl : '', installDir: typeof saved.installDir === 'string' ? saved.installDir : '',
+        accessKey: validAccessKey(saved.accessKey) ? saved.accessKey : '' };
     } catch (error) { if (error.code !== 'ENOENT') state.message = `Could not read saved settings: ${error.message}`; }
     for (const [flag, key] of [['--feed-url=', 'feedUrl'], ['--install-dir=', 'installDir']]) {
       const value = process.argv.find(argument => argument.startsWith(flag));
@@ -149,6 +155,18 @@ else {
       send({ phase: 'idle', message: 'Update server reset to the default.', canPlay: false, version: undefined, news: [] });
       return effective();
     });
+    const saveKey = async (value, message) => {
+      if (busy) throw new Error('Wait for the current operation to finish.');
+      if (!validAccessKey(value)) throw new Error('The access key cannot contain control characters or exceed 256 characters.');
+      settings.accessKey = value; await persist();
+      send({ phase: 'idle', message, canPlay: false, version: undefined, news: [] });
+      return effective();
+    };
+    handle('saveAccessKey', value => {
+      const key = typeof value === 'string' ? value.trim() : value;
+      return saveKey(key, key ? 'Access key saved.' : 'Saved access key cleared.');
+    });
+    handle('clearAccessKey', () => saveKey('', 'Saved access key cleared.'));
     handle('chooseFolder', async () => {
       if (busy) throw new Error('Wait for the current operation to finish.');
       const result = await dialog.showOpenDialog(window, { title: 'Choose SlumsMS game folder', properties: ['openDirectory', 'createDirectory'], defaultPath: effective().installDir });
@@ -167,7 +185,7 @@ else {
     handle('check', () => operation('checking', checkRelease).then(() => undefined));
     const install = mode => operation('updating', async () => {
       const { feedUrl, installDir } = requireSettings();
-      const release = await loadRelease(feedUrl, { installDir });
+      const release = await loadRelease(feedUrl, { installDir, accessKey: accessKey() });
       send({ version: release.version, news: release.news ?? [], message: mode === 'full' ? 'Verifying every file and repairing damage.' : 'Installing missing or changed files.' });
       await installRelease(installDir, release, progress, { mode, concurrency: config.downloadConcurrency });
       await checkRelease();

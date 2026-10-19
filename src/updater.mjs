@@ -246,12 +246,40 @@ function permanent(error) {
   return error;
 }
 
-async function request(input, signal) {
+export const ACCESS_KEY_USER = 'slums';
+export const ACCESS_KEY_MESSAGE = 'This server needs an access key - enter it in Settings';
+
+/**
+ * Bind an optional access key to the feed's origin. The Authorization header is only ever attached
+ * to requests whose origin equals that origin; an empty key yields no header at all.
+ */
+export function feedAccess(feedUrl, accessKey = '') {
+  const key = typeof accessKey === 'string' ? accessKey : '';
+  return Object.freeze({
+    origin: networkURL(feedUrl).origin,
+    authorization: key ? `Basic ${Buffer.from(`${ACCESS_KEY_USER}:${key}`, 'utf8').toString('base64')}` : '',
+  });
+}
+
+function accessDenied(status) {
+  const error = permanent(new Error(ACCESS_KEY_MESSAGE));
+  error.status = status;
+  error.code = 'ACCESS_KEY_REQUIRED';
+  return error;
+}
+
+async function request(input, signal, access = null) {
   let url = networkURL(input);
   const secure = url.protocol === 'https:';
+  // The key is sent only while the chain stays on the feed's origin. A redirect to any other origin
+  // drops it for the rest of the chain, even if a later hop points back, so no other host sees it.
+  let trusted = Boolean(access?.authorization);
   for (let redirects = 0; redirects <= 5; redirects += 1) {
     if (secure && url.protocol !== 'https:') throw permanent(new Error('An HTTPS release cannot redirect to HTTP.'));
-    const response = await fetch(url, { redirect: 'manual', signal, headers: { 'Accept-Encoding': 'identity' } });
+    if (url.origin !== access?.origin) trusted = false;
+    const headers = { 'Accept-Encoding': 'identity' };
+    if (trusted) headers.Authorization = access.authorization;
+    const response = await fetch(url, { redirect: 'manual', signal, headers });
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       await response.body?.cancel();
       const location = response.headers.get('location');
@@ -261,6 +289,8 @@ async function request(input, signal) {
     }
     if (!response.ok) {
       await response.body?.cancel();
+      // 401/403 from the feed means a missing or wrong key; it is permanent, so never retried.
+      if ((response.status === 401 || response.status === 403) && access && url.origin === access.origin) throw accessDenied(response.status);
       const error = new Error(`Release request failed: HTTP ${response.status} ${response.statusText}.`);
       error.status = response.status;
       if (response.status < 500 && ![408, 425, 429].includes(response.status)) permanent(error);
@@ -271,8 +301,8 @@ async function request(input, signal) {
   throw permanent(new Error('Release request exceeded the redirect limit.'));
 }
 
-async function readJSON(input, label) {
-  const { response, url } = await request(input);
+async function readJSON(input, label, access) {
+  const { response, url } = await request(input, undefined, access);
   const declared = Number(response.headers.get('content-length'));
   if (declared > MAX_MANIFEST_BYTES) throw new Error(`${label} is too large.`);
   const bytes = Buffer.from(await response.arrayBuffer());
@@ -463,8 +493,9 @@ async function writeLayerCache(root, release) {
  * Load a release. schemaVersion 2 releases fetch each layer manifest (verified against the
  * top-level SHA-256) unless an identical layer manifest is cached in `installDir`.
  */
-export async function loadRelease(feedUrl, { installDir } = {}) {
-  const top = await readJSON(networkURL(feedUrl), 'release manifest');
+export async function loadRelease(feedUrl, { installDir, accessKey = '' } = {}) {
+  const access = feedAccess(feedUrl, accessKey);
+  const top = await readJSON(networkURL(feedUrl), 'release manifest', access);
   const manifest = validateManifest(parseJSON(top.bytes, 'release manifest'));
   let files;
   const layers = [];
@@ -478,7 +509,7 @@ export async function loadRelease(feedUrl, { installDir } = {}) {
       let source = await cachedLayer(installDir, reference, requestUrl);
       const cached = Boolean(source);
       if (!source) {
-        source = await readJSON(requestUrl, `layer manifest ${reference.name}`);
+        source = await readJSON(requestUrl, `layer manifest ${reference.name}`, access);
         if (sha256(source.bytes) !== reference.sha256) throw new Error(`Layer manifest ${reference.name}@${reference.version} failed SHA-256 verification.`);
       }
       const layer = validateLayerManifest(parseJSON(source.bytes, `layer manifest ${reference.name}`), reference);
@@ -498,7 +529,7 @@ export async function loadRelease(feedUrl, { installDir } = {}) {
     layers: Object.freeze(layers),
     files: Object.freeze(files.map((file) => Object.freeze(file))),
   });
-  loaded.set(release, { layerSources });
+  loaded.set(release, { layerSources, access });
   return release;
 }
 
@@ -588,8 +619,8 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
   signal.addEventListener('abort', abort, { once: true });
 });
 
-async function download(file, target, onBytes, signal) {
-  const { response } = await request(file.url, signal);
+async function download(file, target, onBytes, signal, access) {
+  const { response } = await request(file.url, signal, access);
   const hash = createHash('sha256');
   let size = 0;
   const verify = new Transform({
@@ -618,6 +649,7 @@ export async function installRelease(root, release, onProgress = () => {}, optio
   const { mode = 'fast', concurrency = DEFAULT_CONCURRENCY, retries = 4, retryDelayMs = 500 } = options;
   if (!loaded.has(release)) throw new Error('Load the release from its manifest URL before downloading files.');
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > MAX_CONCURRENCY) throw new Error(`Concurrency must be 1-${MAX_CONCURRENCY}.`);
+  const { access } = loaded.get(release);
   const pending = await inspect(root, release, onProgress, mode);
   const result = { files: pending.files, bytes: pending.bytes, hashed: pending.hashed };
   const installation = await installationRoot(root, true);
@@ -656,7 +688,7 @@ export async function installRelease(root, release, onProgress = () => {}, optio
           received += count;
           bytesDone += count;
           progress(`Downloading ${file.path}`);
-        }, controller.signal);
+        }, controller.signal, access);
         break;
       } catch (error) {
         bytesDone -= received;

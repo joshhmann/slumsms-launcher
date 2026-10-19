@@ -5,7 +5,7 @@ const elements = Object.fromEntries([
   'action-help', 'play', 'play-label', 'error-message', 'open-settings', 'settings-dialog',
   'close-settings', 'install-dir', 'folder-source', 'choose-folder', 'open-folder', 'repair-files',
   'feed-form', 'feed-url', 'feed-help', 'feed-notice', 'save-feed', 'reset-feed', 'settings-error',
-  'version-info',
+  'version-info', 'access-key-form', 'access-key', 'access-key-help', 'save-access-key', 'clear-access-key',
 ].map((id) => [id, document.getElementById(id)]));
 
 const phaseNames = {
@@ -27,10 +27,10 @@ const phaseHeadings = {
   error: 'Let’s get you back on track.',
 };
 const busyPhases = new Set(['checking', 'updating', 'launching']);
-const bridgeMethods = ['settings', 'saveFeed', 'resetFeed', 'chooseFolder', 'openFolder', 'check', 'update', 'repair', 'play', 'onState'];
+const bridgeMethods = ['settings', 'saveFeed', 'resetFeed', 'saveAccessKey', 'clearAccessKey', 'chooseFolder', 'openFolder', 'check', 'update', 'repair', 'play', 'onState'];
 const bridge = window.launcher;
 const bridgeAvailable = bridgeMethods.every((method) => typeof bridge?.[method] === 'function');
-const configuration = { feedUrl: '', installDir: '', defaultFeedUrl: '', feedOverridden: false, installDirSource: 'default', appVersion: '' };
+const configuration = { feedUrl: '', installDir: '', defaultFeedUrl: '', feedOverridden: false, installDirSource: 'default', accessKeySource: 'none', appVersion: '' };
 let state = { phase: 'idle', message: 'Loading launcher settings…', canPlay: false };
 let initialized = false;
 let operation = null;
@@ -141,7 +141,7 @@ function renderNews() {
 }
 
 function primaryAction() {
-  if (!configuration.feedUrl) return { kind: 'settings', label: 'Open settings', run: openSettings };
+  if (!configuration.feedUrl || (state.phase === 'error' && state.accessKeyNeeded)) return { kind: 'settings', label: 'Open settings', run: openSettings };
   if (state.phase === 'ready' && state.canPlay) return { kind: 'play', label: 'Play', run: () => perform('play', () => bridge.play()) };
   if (state.phase === 'needs-update') {
     return { kind: 'update', label: state.fresh ? 'Install' : 'Update', run: () => perform('update', () => bridge.update()) };
@@ -214,6 +214,16 @@ function render() {
     : 'Only change this if your server staff gave you a different manifest URL.';
   elements['feed-notice'].textContent = validationMessage || (dirty ? 'Unsaved. Press Save to use this server.' : '');
   elements['feed-url'].setAttribute('aria-invalid', validationMessage ? 'true' : 'false');
+  const typedKey = elements['access-key'].value.trim();
+  elements['access-key'].disabled = blocked;
+  elements['save-access-key'].disabled = blocked || !typedKey;
+  elements['save-access-key'].textContent = operation === 'access-key' ? 'Saving…' : 'Save';
+  elements['clear-access-key'].hidden = configuration.accessKeySource !== 'saved';
+  elements['clear-access-key'].disabled = blocked;
+  elements['access-key-help'].textContent = {
+    saved: 'Using the key you saved. Enter a new one to replace it.',
+    'built-in': 'Using the key built into this launcher. Enter one to override it.',
+  }[configuration.accessKeySource] ?? 'Only needed if the update server asks for one.';
   elements['version-info'].textContent = [configuration.appVersion && `Launcher ${configuration.appVersion}`, state.version && `Game ${state.version}`]
     .filter(Boolean).join(' · ');
 
@@ -225,6 +235,7 @@ function render() {
   else if (phase === 'ready' && state.canPlay) help = 'All game files verified.';
   else if (fresh) help = 'Install downloads the game, then checks every file.';
   else if (phase === 'needs-update') help = 'Update downloads only the files that changed.';
+  else if (phase === 'error' && state.accessKeyNeeded) help = 'Open Settings and enter the access key your server staff gave you.';
   else if (phase === 'error') help = 'Try again, or open Settings to repair files or change the game folder.';
   else help = 'Check for updates to verify your game files.';
   elements['action-help'].textContent = help;
@@ -252,11 +263,11 @@ function checkNow() {
 }
 
 /** Run a settings change, then re-check when the feed or folder actually changed. */
-async function changeSettings(name, action) {
+async function changeSettings(name, action, { recheck = false } = {}) {
   // State broadcasts may apply the new settings before the call returns, so compare against a snapshot.
   const before = `${configuration.feedUrl}\n${configuration.installDir}`;
   await perform(name, async () => { applySettings(await action(), { forceFeed: true }); });
-  if (before !== `${configuration.feedUrl}\n${configuration.installDir}` && !errorMessage) await checkNow();
+  if ((recheck || before !== `${configuration.feedUrl}\n${configuration.installDir}`) && !errorMessage) await checkNow();
 }
 
 function openSettings() {
@@ -292,6 +303,19 @@ elements['feed-form'].addEventListener('submit', (event) => {
   void changeSettings('save', () => bridge.saveFeed(url));
 });
 
+// The key is sent to the main process once and never read back into the page.
+elements['access-key'].addEventListener('input', render);
+elements['access-key-form'].addEventListener('submit', (event) => {
+  event.preventDefault();
+  const key = elements['access-key'].value.trim();
+  if (!key) return;
+  elements['access-key'].value = '';
+  void changeSettings('access-key', () => bridge.saveAccessKey(key), { recheck: true });
+});
+elements['clear-access-key'].addEventListener('click', () => {
+  elements['access-key'].value = '';
+  void changeSettings('access-key', () => bridge.clearAccessKey(), { recheck: true });
+});
 elements['reset-feed'].addEventListener('click', () => void changeSettings('save', () => bridge.resetFeed()));
 const chooseFolder = () => void changeSettings('folder', () => bridge.chooseFolder());
 elements['choose-folder'].addEventListener('click', chooseFolder);

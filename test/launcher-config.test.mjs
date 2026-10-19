@@ -17,11 +17,11 @@ test('config files layer in order, skip missing files and validate values', asyn
   const override = path.join(root, 'override.json');
   await writeFile(builtIn, JSON.stringify({ feedUrl: 'https://example.com/manifest.json', clientExecutable: 'MapleStory.exe' }));
   assert.deepEqual(await readLauncherConfig([builtIn, path.join(root, 'missing.json')]),
-    { feedUrl: 'https://example.com/manifest.json', clientExecutable: 'MapleStory.exe', downloadConcurrency: 12 });
+    { feedUrl: 'https://example.com/manifest.json', clientExecutable: 'MapleStory.exe', downloadConcurrency: 12, accessKey: '' });
   await writeFile(override, JSON.stringify({ feedUrl: 'https://cdn.example.net/live/manifest.json' }));
   assert.deepEqual(await readLauncherConfig([builtIn, override]),
-    { feedUrl: 'https://cdn.example.net/live/manifest.json', clientExecutable: 'MapleStory.exe', downloadConcurrency: 12 });
-  assert.deepEqual(await readLauncherConfig([]), { feedUrl: '', clientExecutable: '', downloadConcurrency: 12 });
+    { feedUrl: 'https://cdn.example.net/live/manifest.json', clientExecutable: 'MapleStory.exe', downloadConcurrency: 12, accessKey: '' });
+  assert.deepEqual(await readLauncherConfig([]), { feedUrl: '', clientExecutable: '', downloadConcurrency: 12, accessKey: '' });
   await writeFile(override, JSON.stringify({ downloadConcurrency: 4 }));
   assert.equal((await readLauncherConfig([builtIn, override])).downloadConcurrency, 4);
   for (const bad of [0, 33, 2.5, '8']) {
@@ -67,5 +67,5 @@ test('standalone installs default to a per-user folder', () => {
 
 test('shipped defaults point at the SlumsMS HTTPS feed and SlumsMS.exe', async () => {
   const shipped = await readLauncherConfig([new URL('../src/launcher.config.json', import.meta.url)]);
-  assert.deepEqual(shipped, { feedUrl: 'https://slumspatch.asslorde.com/manifest.json', clientExecutable: 'SlumsMS.exe', downloadConcurrency: 12 });
+  assert.deepEqual(shipped, { feedUrl: 'https://slumspatch.asslorde.com/manifest.json', clientExecutable: 'SlumsMS.exe', downloadConcurrency: 12, accessKey: '' });
 });
