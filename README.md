@@ -7,8 +7,11 @@ Separate SlumsMS-branded launcher and static release publisher for the existing 
 - Select a writable game folder and a trusted HTTPS release manifest.
 - Install an empty folder, verify installed files, and repair/download missing or changed files.
 - Recursive loose IMG trees: no fixed WZ list and no asset-format conversion.
-- Streaming SHA-256 and size verification; six parallel downloads. Every changed payload verifies in staging before destination replacement begins.
-- Play verifies the selected release, then starts its configured executable/arguments with the game folder as working directory. Windows uses Start-Process/ShellExecute so the client can request its own UAC elevation. The launcher does not rewrite client INIs.
+- Layered releases: a large, rarely changing `base` layer (game Data) and a small `client` layer (SlumsMS.exe, DLLs, Custom.wz, config.ini, overlays), each with its own version. Only layers whose version changed are fetched.
+- Fast verify for Play (size + mtime against a per-install state file) and a full SHA-256 Repair.
+- Streaming SHA-256 and size verification; configurable parallel downloads (default 12) with retry and backoff for transient failures; overall progress by bytes. Every download verifies in staging before it is moved into place.
+- Player-owned files (by default `config.ini`) are installed once and never overwritten afterwards.
+- Play fast-verifies the selected release, then starts its configured executable/arguments with the game folder as working directory. Windows uses Start-Process/ShellExecute so the client can request its own UAC elevation. The launcher does not rewrite client INIs.
 - Settings live in Electron's per-user application-data directory, separate from the game installation.
 - A dependency-free Node publisher makes immutable version folders and publishes manifest.json last.
 
@@ -29,44 +32,58 @@ If your package manager blocks Electron's dependency install script, review it a
 
 This LXC used a checksum-verified isolated Node runtime under `/tmp/node-v24.22.0-linux-x64/`; Node was not installed globally. Prefix local development commands with `PATH=/tmp/node-v24.22.0-linux-x64/bin:$PATH` while that runtime exists, or install Node normally for a durable developer setup.
 
-## Publish only an approved Windows client build
+## Publishing releases (layers)
 
-The publisher copies every regular file from the source staging directory. It does not guess which configuration or build is current. Keep source private keys, credentials, logs, private settings and development-only files OUT of the approved staging tree. Client INIs are untouched only when they are unlisted; including one in the release makes it a managed file that may be replaced.
+A release is a small top-level `manifest.json` that points at immutable **layer** versions. Layers apply in order; a later layer overrides an earlier one for the same path.
 
-From this project in Windows PowerShell:
+- `base`: the loose MapleStory v83 Data tree and other rarely changing files (~23.6 GB, ~86k files). Publish it **once**, and again only when the game data changes.
+- `client`: SlumsMS.exe, MapleStory.exe if it changes, slums.dll and other DLLs, Custom.wz, config.ini and overlay files. Publish a new client version for each release.
 
-```powershell
-$source = Read-Host 'Approved client staging directory'
-$output = Read-Host 'Separate release output directory'
-$version = Read-Host 'Unique release version'
-$exe = Read-Host 'Client or bootstrap executable path relative to staging'
-node tools/publish.mjs --source $source --out $output --version $version --exe $exe
+The publisher copies every regular file from the source directory and does not guess what is approved. Keep private keys, credentials, logs, private settings and development-only files OUT of the staging trees.
+
+```sh
+# (a) base layer, from the Data staging directory (once)
+node tools/publish.mjs --layer base --source /srv/stage/base --out /srv/release --version v83-2026.10.19
+
+# (b) client layer, for each release
+node tools/publish.mjs --layer client --source /srv/stage/client --out /srv/release --version 2026.10.19-1
+
+# point players at it (writes manifest.json last; later --use overrides earlier)
+node tools/publish.mjs --release 2026.10.19-1 --out /srv/release \
+  --use base@v83-2026.10.19 --use client@2026.10.19-1 [--news news.json]
 ```
 
-Append repeated `--arg VALUE` pairs only when that executable requires arguments. The executable must be one of the published files. Paths inside the manifest use forward slashes. No executable name, server address, port or launch arguments are assumed for the Windows build currently in development.
+Paths inside a layer are relative to its source directory, so the base source should mirror the client root (e.g. `/srv/stage/base/Data/Mob/...`). `--release` defaults to `--exe SlumsMS.exe` with no arguments and `--player-owned config.ini`; repeat `--player-owned PATH` to choose other files, `--no-player-owned` for none, and `--arg VALUE` for launch arguments. It refuses layers that are not published, an executable missing from every layer, Windows path aliases between layers, and re-using the version already in `manifest.json`.
 
-Output:
+Server layout:
 
 ```text
 release-output/
-  manifest.json
-  VERSION/
-    executable and complete approved client tree
+  manifest.json                         <- small, mutable, written last; serve no-cache
+  layers/
+    base/v83-2026.10.19/
+      manifest.json                     <- layer manifest (its SHA-256 is pinned in the top manifest)
+      files/Data/Mob/0100100.img ...
+    client/2026.10.19-1/
+      manifest.json
+      files/SlumsMS.exe, slums.dll, Data/Custom.wz, config.ini ...
 ```
 
-Upload the entire new VERSION directory to static HTTPS hosting, then upload/replace manifest.json last. Keep the directory layout intact. Any ordinary HTTPS static host/CDN/object store can serve it; no running Node/dashboard API is required. Configure manifest.json for revalidation/no-cache and immutable version directories for long caching. The launcher supports redirected feed URLs and resolves payload paths against the final manifest location.
+Upload new layer version folders completely, then upload/replace `manifest.json` last. Layer version folders are immutable: never edit one in place, publish a new version instead. Serve `manifest.json` with revalidation/no-cache and `layers/` with long-lived caching. Any static HTTPS host/CDN/object store works; the launcher resolves layer manifests relative to the final (post-redirect) top manifest URL, and layer files relative to their layer manifest.
 
-No public hostname, TLS deployment, live download service or official client release has been configured. The old control/repack files have NOT been published as the current client. Put the eventual HTTPS manifest URL in `src/launcher.config.json` (see below) so players never have to enter it.
+### Legacy single-folder releases
+
+`node tools/publish.mjs --source DIR --out DIR --version VERSION [--exe SlumsMS.exe] [--arg VALUE ...] [--news FILE.json]` still writes a schemaVersion 1 release (`OUT/VERSION/...` plus `OUT/manifest.json`), and the launcher still reads schemaVersion 1 manifests.
 
 ## Launcher defaults and bundling
 
 `src/launcher.config.json` ships inside the app and sets the defaults:
 
 ```json
-{ "feedUrl": "https://example.com/manifest.json", "clientExecutable": "MapleStory.exe" }
+{ "feedUrl": "https://slumspatch.asslorde.com/manifest.json", "clientExecutable": "SlumsMS.exe", "downloadConcurrency": 12 }
 ```
 
-Both values are placeholders: replace `feedUrl` with the real manifest URL and `clientExecutable` with the client's executable file name before building. A packaged launcher also reads an optional `launcher.config.json` beside `SlumsMS Launcher.exe`, which overrides the built-in values without a rebuild. The player's own choices in Settings (stored in Electron's per-user `settings.json`) override both; "Reset to default" clears a custom update server.
+`feedUrl` must be HTTPS (HTTP only on localhost for development). `clientExecutable` is the file name used to detect a client shipped next to the launcher; what Play starts comes from the release manifest's `launch` (SlumsMS.exe, which starts MapleStory.exe with slums.dll). `downloadConcurrency` is 1-32. A packaged launcher also reads an optional `launcher.config.json` beside `SlumsMS Launcher.exe`, which overrides the built-in values without a rebuild. The player's own choices in Settings (stored in Electron's per-user `settings.json`) override both; "Reset to default" clears a custom update server.
 
 The game folder is chosen in this order:
 
@@ -74,7 +91,26 @@ The game folder is chosen in this order:
 2. Bundled: the folder containing the launcher, or its parent, when it contains `clientExecutable`. Ship the launcher in a `Launcher/` subfolder of the client so its runtime files stay out of the client root.
 3. Standalone: `%LOCALAPPDATA%\SlumsMS`, which never needs elevation.
 
-On start the launcher checks the release automatically, then shows a single button: Install (no client yet), Update (files changed) or Play (verified). Repair, the game folder and the update server live behind the Settings (gear) button.
+On start the launcher checks the release automatically (fast verify), then shows a single button: Install (no client yet), Update (files changed) or Play (verified). Repair, the game folder and the update server live behind the Settings (gear) button.
+
+## Fast verify vs Repair
+
+After every successful install, update or repair the launcher writes `.slumsms-launcher/state.json` inside the game folder: for each managed file its relative path, size, mtime and SHA-256.
+
+- **Play / Check / Update (fast):** each file is `lstat`ed. A missing file or one whose size differs from the release is downloaded. A file whose size and mtime match the state, and whose recorded SHA-256 equals the release's, is trusted without being read. Anything else (changed mtime, no state entry) is hashed; if the hash matches, the new mtime is recorded so the next launch is fast again. An unchanged 86k-file install therefore costs only a stat pass instead of re-hashing 23.6 GB.
+- **Repair (Settings > Verify and repair):** ignores the state and SHA-256 hashes every managed file, then downloads anything damaged.
+
+Limit: an edit that keeps the same size **and** restores the same mtime is not seen by fast verify; only Repair catches it. Any ordinary tamper or corruption that changes size or mtime is caught on Play. The state file is a local cache, not a security boundary; deleting it just makes the next check hash everything.
+
+Player-owned files (the release's `playerOwned` list; `config.ini` by default) are installed only when missing. An existing copy is never replaced, by Update or Repair, so a player's server address or settings survive releases. Delete it to get the release's default back.
+
+## Downloads
+
+Installs use per-file downloads (default 12 in parallel). Transient failures (network errors, short bodies, HTTP 408/425/429/5xx) are retried up to 4 times with exponential backoff and jitter; a 4xx or a full-size SHA-256 mismatch fails immediately. Progress is reported as overall bytes and file counts, throttled to about 10 updates a second; the file list itself never crosses into the page.
+
+Each file is downloaded into `.mapleroot-stage-*`, size- and SHA-256-verified, then moved into place. Files that did not exist yet are moved in as soon as they verify and recorded in the state (checkpointed every 15 s and on failure), so an interrupted first install resumes where it left off without re-downloading or re-hashing finished files. Files that replace existing ones are moved in only after every download in that run has verified. An interrupted single file restarts from zero (no HTTP range resume).
+
+Chunked archives were considered and not implemented: the Data .img files barely compress (~97% under xz), so archives would save little bandwidth while costing resumability, extra disk space and a second verification path. Per-file downloads are correct on their own.
 
 ## Release news
 
@@ -87,19 +123,26 @@ Add `--news FILE.json` when publishing to include release notes in `manifest.jso
 ]
 ```
 
-At most 10 entries. `title` (up to 120 characters, one line) is required; `date` (`YYYY-MM-DD`) and `body` (up to 1000 characters, line breaks allowed) are optional. News is part of the release, so changing it means publishing a new version.
+At most 10 entries. `title` (up to 120 characters, one line) is required; `date` (`YYYY-MM-DD`) and `body` (up to 1000 characters, line breaks allowed) are optional. News is part of the top-level manifest, so changing it means writing a new release version (`--release`); layers do not need republishing.
 
 ## Manifest contract
 
-`schemaVersion:1`, a nonempty `version`, `launch:{executable,args}`, `files:[{path,size,sha256,url}]`, and optional `news` (see above). The publisher generates these fields; callers should not hand-edit them. File URLs are encoded relative URLs. The launch executable is listed with identical spelling. Paths reject traversal, Windows device names, aliases/case collisions and symlink destinations. Remote transport requires HTTPS; loopback HTTP is permitted only for local development.
+The publisher generates these fields; do not hand-edit them.
+
+- **schemaVersion 2 (top level):** `{ schemaVersion: 2, version, launch: { executable, args }, news?, playerOwned?: [path], layers: [{ name, version, manifestUrl, sha256 }] }`. `sha256` is the hash of the layer manifest's exact bytes; the launcher refuses a layer manifest that does not match. Layer names are letters/digits/`-`/`_`; versions are single safe path components.
+- **Layer manifest:** `{ schemaVersion: 2, layer, version, files: [{ path, size, sha256, url }] }`, `layer`/`version` must match the reference. File URLs are relative to the layer manifest.
+- **schemaVersion 1 (legacy):** `{ schemaVersion: 1, version, launch, files, news?, playerOwned? }` with file URLs relative to the manifest.
+
+The launch executable must be a file of the merged release with identical spelling. Paths (files, launch, player-owned) reject traversal (`..`, absolute, drive or backslash paths), Windows device names, aliases/case collisions (also across layers), symlink destinations and the launcher's reserved `.slumsms-launcher/` and `.mapleroot-stage-*` directories. URLs must be relative, without schemes, fragments or protocol-relative hosts. Remote transport requires HTTPS; loopback HTTP is permitted only for local development, and HTTPS never redirects to HTTP.
 
 The feed is trusted executable-distribution authority. SHA-256 verifies against the manifest; it does NOT independently authenticate a compromised manifest/host. TLS and release-host access controls are required. Do not add an untrusted release feed.
 
 ## Limits and recovery
 
 - Unlisted local files are preserved, not deleted. This is not an obsolete-file removal system. Prefer a fresh dedicated folder for initial migration from another client.
-- Updates transfer entire changed files, not binary deltas. Checks/Play stream-hash every managed file; a large IMG installation takes time. Publishing/inspection are sequential; downloads use six workers.
-- Allow space for the entire changed-file set in addition to the current installation. Downloads stage under `.mapleroot-stage-*` inside the installation.
+- Updates transfer entire changed files, not binary deltas. Play uses fast verify; Repair hashes every managed file and takes time on a 23.6 GB install. Publishing is sequential (expect a long first base publish).
+- Allow space for the changed files that replace existing ones in addition to the current installation (new files move into place as they verify). Downloads stage under `.mapleroot-stage-*` inside the installation.
+- Unused layer files are not deleted when a layer version changes (unlisted files are preserved).
 - Commit is atomic per file, NOT a whole-tree rollback transaction. A crash/disk error during replacement can leave a mixed tree; the next check blocks Play until repair. A bad download is rejected before replacement starts.
 - Interrupted processes can leave staging directories, a reserved unpublished version directory or publisher `.mapleroot-publish.lock` directory. Ensure no process is using them before manual cleanup; use a new version rather than overwriting an already-published release.
 - Close during an operation prompts before quitting. Native filesystem operations assume trusted local directories; portable Node does not eliminate hostile concurrent directory-swap races.
@@ -107,6 +150,8 @@ The feed is trusted executable-distribution authority. SHA-256 verifies against 
 
 ## Verification exercised
 
+- Layered-release unit/HTTP tests (`test/layers.test.mjs`): publisher layer/top-level output and immutability; layer override order; only changed layers fetched (unchanged base layer manifest and files not requested); fast verify for unchanged, size change, mtime change, same-size tamper, missing, and the same-size-same-mtime limit caught only by Repair; player-owned config.ini; schemaVersion 1 compatibility; path traversal/reserved-path rejection in manifests, layer manifests and a hosted layer; retry/backoff, byte progress, permanent 404 and resumed install.
+- Scale smoke (not in the suite): 30k-file layer on Linux, fast verify of an unchanged install ~1.2 s vs ~3.8 s full hash of tiny files; state file ~4 MB.
 - Five passing real-HTTP regression scenarios: fresh nested install/unchanged scan/repair with player-file preservation; corrupt payload preventing partial replacement; immutable publication/symlinks/Windows path aliases; redirected feed resolution; optional release news round-trip and rejection. The redirect regression was observed failing before its fix and passing afterward.
 - Launcher config unit tests: layered config files, feed URL rules, bundled-client detection beside or above the launcher, and the standalone default folder.
 - Standalone real static publication, download, hash scan and single-file repair smoke.
@@ -130,4 +175,4 @@ Clone this repository on Windows, install Node22 or newer, then run `npm ci` and
 
 Pending requested change, **not implemented yet**: game-server IP/port in the Settings panel.
 
-Game-server address editing is not wired yet. A staged client outside this repository uses `config.ini` with `[config] host` and `port`; verify the actual desktop build's reader before implementing it. Preserve other INI fields and define ownership so updates do not overwrite a saved address or cause permanent checksum mismatches. No production release feed or approved client package has been published.
+Game-server address editing is not wired yet. A staged client outside this repository uses `config.ini` with `[config] host` and `port`; verify the actual desktop build's reader before implementing it. Ownership is now defined: `config.ini` is player-owned by default (installed once, never overwritten), so a saved address survives updates; the Settings editor itself still needs to preserve other INI fields. No production release feed or approved client package has been published.

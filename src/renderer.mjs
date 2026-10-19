@@ -27,7 +27,7 @@ const phaseHeadings = {
   error: 'Let’s get you back on track.',
 };
 const busyPhases = new Set(['checking', 'updating', 'launching']);
-const bridgeMethods = ['settings', 'saveFeed', 'resetFeed', 'chooseFolder', 'openFolder', 'check', 'update', 'play', 'onState'];
+const bridgeMethods = ['settings', 'saveFeed', 'resetFeed', 'chooseFolder', 'openFolder', 'check', 'update', 'repair', 'play', 'onState'];
 const bridge = window.launcher;
 const bridgeAvailable = bridgeMethods.every((method) => typeof bridge?.[method] === 'function');
 const configuration = { feedUrl: '', installDir: '', defaultFeedUrl: '', feedOverridden: false, installDirSource: 'default', appVersion: '' };
@@ -301,7 +301,7 @@ elements['open-folder'].addEventListener('click', () => {
 });
 elements['repair-files'].addEventListener('click', () => {
   elements['settings-dialog'].close();
-  void perform('update', () => bridge.update());
+  void perform('update', () => bridge.repair());
 });
 elements['open-settings'].addEventListener('click', openSettings);
 elements['close-settings'].addEventListener('click', () => elements['settings-dialog'].close());

@@ -2,6 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 const localHosts = ['localhost', '127.0.0.1', '[::1]'];
+export const DEFAULT_DOWNLOAD_CONCURRENCY = 12;
 
 /** Normalize a release feed URL; only HTTPS, or HTTP on localhost for development. */
 export function validateFeedUrl(value) {
@@ -14,7 +15,7 @@ export function validateFeedUrl(value) {
 
 /** Read launcher.config.json files in order; later files override earlier ones and missing files are skipped. */
 export async function readLauncherConfig(files) {
-  const config = { feedUrl: '', clientExecutable: '' };
+  const config = { feedUrl: '', clientExecutable: '', downloadConcurrency: DEFAULT_DOWNLOAD_CONCURRENCY };
   for (const file of files) {
     let raw;
     try { raw = await readFile(file, 'utf8'); } catch (error) {
@@ -33,6 +34,11 @@ export async function readLauncherConfig(files) {
       const name = value.clientExecutable;
       if (name === '.' || name === '..' || /[\\/]/u.test(name)) throw new Error(`Launcher config clientExecutable must be a file name in ${file}.`);
       config.clientExecutable = name;
+    }
+    if (value.downloadConcurrency !== undefined) {
+      const count = value.downloadConcurrency;
+      if (!Number.isSafeInteger(count) || count < 1 || count > 32) throw new Error(`Launcher config downloadConcurrency must be an integer from 1 to 32 in ${file}.`);
+      config.downloadConcurrency = count;
     }
   }
   return config;

@@ -17,11 +17,17 @@ test('config files layer in order, skip missing files and validate values', asyn
   const override = path.join(root, 'override.json');
   await writeFile(builtIn, JSON.stringify({ feedUrl: 'https://example.com/manifest.json', clientExecutable: 'MapleStory.exe' }));
   assert.deepEqual(await readLauncherConfig([builtIn, path.join(root, 'missing.json')]),
-    { feedUrl: 'https://example.com/manifest.json', clientExecutable: 'MapleStory.exe' });
+    { feedUrl: 'https://example.com/manifest.json', clientExecutable: 'MapleStory.exe', downloadConcurrency: 12 });
   await writeFile(override, JSON.stringify({ feedUrl: 'https://cdn.example.net/live/manifest.json' }));
   assert.deepEqual(await readLauncherConfig([builtIn, override]),
-    { feedUrl: 'https://cdn.example.net/live/manifest.json', clientExecutable: 'MapleStory.exe' });
-  assert.deepEqual(await readLauncherConfig([]), { feedUrl: '', clientExecutable: '' });
+    { feedUrl: 'https://cdn.example.net/live/manifest.json', clientExecutable: 'MapleStory.exe', downloadConcurrency: 12 });
+  assert.deepEqual(await readLauncherConfig([]), { feedUrl: '', clientExecutable: '', downloadConcurrency: 12 });
+  await writeFile(override, JSON.stringify({ downloadConcurrency: 4 }));
+  assert.equal((await readLauncherConfig([builtIn, override])).downloadConcurrency, 4);
+  for (const bad of [0, 33, 2.5, '8']) {
+    await writeFile(override, JSON.stringify({ downloadConcurrency: bad }));
+    await assert.rejects(readLauncherConfig([override]), /downloadConcurrency/);
+  }
 
   await writeFile(override, JSON.stringify({ feedUrl: 'http://example.com/manifest.json' }));
   await assert.rejects(readLauncherConfig([override]), /feedUrl is invalid/);
@@ -57,4 +63,9 @@ test('standalone installs default to a per-user folder', () => {
   assert.equal(standaloneInstallDir({ home: 'H', platform: 'win32', env: { LOCALAPPDATA: 'L' } }), path.join('L', 'SlumsMS'));
   assert.equal(standaloneInstallDir({ home: 'H', platform: 'linux', env: {} }), path.join('H', 'SlumsMS'));
   assert.equal(standaloneInstallDir({ home: 'H', platform: 'win32', env: {} }), path.join('H', 'SlumsMS'));
+});
+
+test('shipped defaults point at the SlumsMS HTTPS feed and SlumsMS.exe', async () => {
+  const shipped = await readLauncherConfig([new URL('../src/launcher.config.json', import.meta.url)]);
+  assert.deepEqual(shipped, { feedUrl: 'https://slumspatch.asslorde.com/manifest.json', clientExecutable: 'SlumsMS.exe', downloadConcurrency: 12 });
 });

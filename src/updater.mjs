@@ -5,9 +5,21 @@ import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
-const origins = new WeakMap();
+/** Launcher bookkeeping inside an installation; manifests may never write here. */
+export const STATE_DIRECTORY = '.slumsms-launcher';
+const STATE_FILE = `${STATE_DIRECTORY}/state.json`;
+const LAYER_CACHE = `${STATE_DIRECTORY}/layers`;
+const STAGE_PREFIX = '.mapleroot-stage-';
+const MAX_MANIFEST_BYTES = 128 * 1024 * 1024;
+const MAX_LAYERS = 16;
+export const DEFAULT_CONCURRENCY = 12;
+export const MAX_CONCURRENCY = 32;
+const STATE_CHECKPOINT_MS = 15_000;
+
+const loaded = new WeakMap();
 const validated = new WeakSet();
 const windowsKey = (name) => name.normalize('NFC').toUpperCase();
+const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 function relativePath(value, label) {
   if (typeof value !== 'string' || !value || value.includes('\\')) {
@@ -24,6 +36,30 @@ function relativePath(value, label) {
   return value;
 }
 
+/** A managed file path: safe, and outside the launcher's own state and staging directories. */
+function managedPath(value, label) {
+  relativePath(value, label);
+  const first = windowsKey(value.split('/')[0]);
+  if (first === windowsKey(STATE_DIRECTORY) || first.startsWith(windowsKey(STAGE_PREFIX))) {
+    throw new Error(`${label} uses a directory reserved for the launcher.`);
+  }
+  return value;
+}
+
+/** A single safe Windows path component (layer versions, release folder names). */
+export function safeComponent(value, label) {
+  if (typeof value !== 'string' || value.includes('/')) throw new Error(`${label} must be a single safe directory name.`);
+  return relativePath(value, label);
+}
+
+/** Layer names: 1-64 ASCII letters, digits, '-' or '_'. */
+export function layerName(value, label = 'Layer name') {
+  if (typeof value !== 'string' || !/^[a-z\d][a-z\d_-]{0,63}$/iu.test(value)) {
+    throw new Error(`${label} must be 1-64 letters, digits, '-' or '_'.`);
+  }
+  return value;
+}
+
 function relativeURL(value, label) {
   if (typeof value !== 'string' || !value || /^[a-z][a-z\d+.-]*:/iu.test(value)
     || value.startsWith('/') || /[\\#\x00-\x20\x7f]/u.test(value)) {
@@ -32,6 +68,11 @@ function relativeURL(value, label) {
   const resolved = new URL(value, 'https://manifest.invalid/');
   if (resolved.origin !== 'https://manifest.invalid') throw new Error(`${label} must be relative.`);
   return value;
+}
+
+function hexDigest(value, label) {
+  if (typeof value !== 'string' || !/^[a-f\d]{64}$/iu.test(value)) throw new Error(`Invalid SHA-256 for ${label}.`);
+  return value.toLowerCase();
 }
 
 function newsText(value, label, max, multiline) {
@@ -58,56 +99,135 @@ function validateNews(value) {
   }));
 }
 
-/** Validate and copy the public manifest; the result is deeply frozen. */
-export function validateManifest(value) {
-  if (!value || typeof value !== 'object' || value.schemaVersion !== 1) {
-    throw new Error('Unsupported manifest: schemaVersion must be 1.');
-  }
-  if (typeof value.version !== 'string' || !value.version.trim()) throw new Error('Manifest version is required.');
-  if (!value.launch || typeof value.launch !== 'object' || !Array.isArray(value.launch.args)
-    || value.launch.args.some((arg) => typeof arg !== 'string' || arg.includes('\0'))) {
+/** Player-owned files are installed only when missing; the player's copy is never replaced. */
+function validatePlayerOwned(value) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 100) throw new Error('Manifest playerOwned must be an array of at most 100 paths.');
+  const seen = new Set();
+  return Object.freeze(value.map((entry, index) => {
+    const name = managedPath(entry, `Player-owned path ${index + 1}`);
+    if (seen.has(windowsKey(name))) throw new Error(`Duplicate player-owned path: ${name}.`);
+    seen.add(windowsKey(name));
+    return name;
+  }));
+}
+
+function validateLaunch(launch) {
+  if (!launch || typeof launch !== 'object' || !Array.isArray(launch.args)
+    || launch.args.some((arg) => typeof arg !== 'string' || arg.includes('\0'))) {
     throw new Error('Manifest launch.args must be an array of strings without NUL characters.');
   }
-  const executable = relativePath(value.launch.executable, 'Launch executable');
-  if (!Array.isArray(value.files)) throw new Error('Manifest files must be an array.');
+  return Object.freeze({ executable: managedPath(launch.executable, 'Launch executable'), args: Object.freeze([...launch.args]) });
+}
+
+function validateFiles(list) {
+  if (!Array.isArray(list)) throw new Error('Manifest files must be an array.');
+  return list.map((file, index) => {
+    if (!file || typeof file !== 'object') throw new Error(`Invalid manifest file ${index + 1}.`);
+    const name = managedPath(file.path, `File ${index + 1}`);
+    if (!Number.isSafeInteger(file.size) || file.size < 0) throw new Error(`Invalid size for ${name}.`);
+    return Object.freeze({ path: name, size: file.size, sha256: hexDigest(file.sha256, name), url: relativeURL(file.url, `URL for ${name}`) });
+  });
+}
+
+/** Reject Windows case/normalization aliases and file/directory collisions in a complete file set. */
+function checkTree(files) {
   const tree = new Map();
   let total = 0;
-  const files = value.files.map((file, index) => {
-    if (!file || typeof file !== 'object') throw new Error(`Invalid manifest file ${index + 1}.`);
-    const name = relativePath(file.path, `File ${index + 1}`);
-    if (!Number.isSafeInteger(file.size) || file.size < 0) throw new Error(`Invalid size for ${name}.`);
+  for (const file of files) {
     total += file.size;
     if (!Number.isSafeInteger(total)) throw new Error('Manifest total size exceeds the supported integer range.');
-    if (typeof file.sha256 !== 'string' || !/^[a-f\d]{64}$/iu.test(file.sha256)) {
-      throw new Error(`Invalid SHA-256 for ${name}.`);
-    }
     let children = tree;
-    const parts = name.split('/');
+    const parts = file.path.split('/');
     for (let depth = 0; depth < parts.length; depth += 1) {
       const part = parts[depth];
       const key = windowsKey(part);
       const last = depth === parts.length - 1;
       const previous = children.get(key);
       if (previous && (previous.name !== part || previous.file || last)) {
-        throw new Error(`Windows path collision in manifest: ${name}.`);
+        throw new Error(`Windows path collision in manifest: ${file.path}.`);
       }
       const node = previous ?? { name: part, file: last, children: new Map() };
       children.set(key, node);
       children = node.children;
     }
-    return Object.freeze({ path: name, size: file.size, sha256: file.sha256.toLowerCase(), url: relativeURL(file.url, `URL for ${name}`) });
-  });
-  if (!files.some((file) => file.path === executable)) throw new Error('Launch executable must be listed with identical spelling in manifest files.');
+  }
+  return total;
+}
+
+function validateLayers(value) {
+  if (!Array.isArray(value) || !value.length || value.length > MAX_LAYERS) throw new Error(`Manifest layers must be an array of 1-${MAX_LAYERS} entries.`);
+  const names = new Set();
+  return Object.freeze(value.map((layer, index) => {
+    if (!layer || typeof layer !== 'object') throw new Error(`Invalid manifest layer ${index + 1}.`);
+    const name = layerName(layer.name, `Layer ${index + 1} name`);
+    if (names.has(name.toLowerCase())) throw new Error(`Duplicate layer name: ${name}.`);
+    names.add(name.toLowerCase());
+    return Object.freeze({
+      name,
+      version: safeComponent(layer.version, `Layer ${name} version`),
+      manifestUrl: relativeURL(layer.manifestUrl, `Layer ${name} manifestUrl`),
+      sha256: hexDigest(layer.sha256, `layer ${name} manifest`),
+    });
+  }));
+}
+
+/**
+ * Validate and copy a top-level manifest; the result is deeply frozen.
+ * schemaVersion 1 lists files directly; schemaVersion 2 references layer manifests.
+ */
+export function validateManifest(value) {
+  if (!value || typeof value !== 'object' || (value.schemaVersion !== 1 && value.schemaVersion !== 2)) {
+    throw new Error('Unsupported manifest: schemaVersion must be 1 or 2.');
+  }
+  if (typeof value.version !== 'string' || !value.version.trim()) throw new Error('Manifest version is required.');
+  const launch = validateLaunch(value.launch);
   const news = validateNews(value.news);
-  const manifest = Object.freeze({
-    schemaVersion: 1,
-    version: value.version,
-    launch: Object.freeze({ executable, args: Object.freeze([...value.launch.args]) }),
-    files: Object.freeze(files),
-    ...(news ? { news } : {}),
-  });
+  const playerOwned = validatePlayerOwned(value.playerOwned);
+  let manifest;
+  if (value.schemaVersion === 1) {
+    const files = validateFiles(value.files);
+    checkTree(files);
+    if (!files.some((file) => file.path === launch.executable)) throw new Error('Launch executable must be listed with identical spelling in manifest files.');
+    manifest = { schemaVersion: 1, version: value.version, launch, files: Object.freeze(files) };
+  } else {
+    manifest = { schemaVersion: 2, version: value.version, launch, layers: validateLayers(value.layers) };
+  }
+  if (news) manifest.news = news;
+  if (playerOwned) manifest.playerOwned = playerOwned;
+  Object.freeze(manifest);
   validated.add(manifest);
   return manifest;
+}
+
+/** Validate a layer manifest; `expected` binds it to the top-level reference. */
+export function validateLayerManifest(value, expected = {}) {
+  if (!value || typeof value !== 'object' || value.schemaVersion !== 2) throw new Error('Unsupported layer manifest: schemaVersion must be 2.');
+  const name = layerName(value.layer, 'Layer manifest name');
+  const version = safeComponent(value.version, `Layer ${name} version`);
+  if ((expected.name !== undefined && expected.name !== name) || (expected.version !== undefined && expected.version !== version)) {
+    throw new Error(`Layer manifest ${name}@${version} does not match the release reference ${expected.name}@${expected.version}.`);
+  }
+  const files = validateFiles(value.files);
+  checkTree(files);
+  return Object.freeze({ schemaVersion: 2, layer: name, version, files: Object.freeze(files) });
+}
+
+/** Combine layers in order: a later layer replaces an earlier layer's file at the same path. */
+export function mergeLayers(layers) {
+  const merged = new Map();
+  for (const { name, files } of layers) {
+    for (const file of files) {
+      const key = windowsKey(file.path);
+      const previous = merged.get(key);
+      if (previous && previous.path !== file.path) throw new Error(`Windows path alias between layers: ${previous.path} and ${file.path}.`);
+      if (previous) merged.delete(key);
+      merged.set(key, { ...file, layer: name });
+    }
+  }
+  const files = [...merged.values()];
+  checkTree(files);
+  return files;
 }
 
 function networkURL(input) {
@@ -121,36 +241,47 @@ function networkURL(input) {
   return url;
 }
 
+function permanent(error) {
+  error.permanent = true;
+  return error;
+}
+
 async function request(input, signal) {
   let url = networkURL(input);
   const secure = url.protocol === 'https:';
   for (let redirects = 0; redirects <= 5; redirects += 1) {
-    if (secure && url.protocol !== 'https:') throw new Error('An HTTPS release cannot redirect to HTTP.');
+    if (secure && url.protocol !== 'https:') throw permanent(new Error('An HTTPS release cannot redirect to HTTP.'));
     const response = await fetch(url, { redirect: 'manual', signal, headers: { 'Accept-Encoding': 'identity' } });
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       await response.body?.cancel();
       const location = response.headers.get('location');
-      if (!location || redirects === 5) throw new Error('Release request has an invalid or excessive redirect chain.');
+      if (!location || redirects === 5) throw permanent(new Error('Release request has an invalid or excessive redirect chain.'));
       url = networkURL(new URL(location, url));
       continue;
     }
     if (!response.ok) {
       await response.body?.cancel();
-      throw new Error(`Release request failed: HTTP ${response.status} ${response.statusText}.`);
+      const error = new Error(`Release request failed: HTTP ${response.status} ${response.statusText}.`);
+      error.status = response.status;
+      if (response.status < 500 && ![408, 425, 429].includes(response.status)) permanent(error);
+      throw error;
     }
-    return response;
+    return { response, url };
   }
-  throw new Error('Release request exceeded the redirect limit.');
+  throw permanent(new Error('Release request exceeded the redirect limit.'));
 }
 
-export async function loadRelease(feedUrl) {
-  const url = networkURL(feedUrl);
-  const response = await request(url);
-  let value;
-  try { value = await response.json(); } catch (error) { throw new Error(`Cannot read release manifest: ${error.message}`, { cause: error }); }
-  const manifest = validateManifest(value);
-  origins.set(manifest, response.url);
-  return manifest;
+async function readJSON(input, label) {
+  const { response, url } = await request(input);
+  const declared = Number(response.headers.get('content-length'));
+  if (declared > MAX_MANIFEST_BYTES) throw new Error(`${label} is too large.`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length > MAX_MANIFEST_BYTES) throw new Error(`${label} is too large.`);
+  return { bytes, finalUrl: url.href };
+}
+
+function parseJSON(bytes, label) {
+  try { return JSON.parse(bytes.toString('utf8')); } catch (error) { throw new Error(`Cannot read ${label}: ${error.message}`, { cause: error }); }
 }
 
 async function statOrMissing(filename) {
@@ -176,17 +307,25 @@ async function checkSpelling(directory, name, cache) {
   }
 }
 
+const VERIFIED_DIRECTORIES = Symbol('verified directories');
+
 async function directoryChild(parent, name, create, cache) {
-  await checkSpelling(parent, name, cache);
   const target = path.join(parent, name);
+  // Within one operation, a directory already checked is not re-checked for every file it holds.
+  let known = cache.get(VERIFIED_DIRECTORIES);
+  if (!known) cache.set(VERIFIED_DIRECTORIES, known = new Set());
+  if (known.has(target)) return true;
+  await checkSpelling(parent, name, cache);
   let stat = await statOrMissing(target);
   if (!stat && create) {
-    await fs.mkdir(target);
+    // Parallel workers may create the same directory; the lstat below still rejects non-directories.
+    try { await fs.mkdir(target); } catch (error) { if (error.code !== 'EEXIST') throw error; }
     cache.get(parent)?.set(windowsKey(name), name);
     stat = await fs.lstat(target);
   }
   if (!stat) return false;
   if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`Not a real directory (symlinks are forbidden): ${target}`);
+  known.add(target);
   return true;
 }
 
@@ -217,6 +356,7 @@ async function destination(root, relative, create, cache) {
   return { filename, stat };
 }
 
+/** Hash a regular file; returns null when it changed while being read. */
 async function digest(filename, onBytes) {
   const hash = createHash('sha256');
   const handle = await fs.open(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
@@ -227,50 +367,235 @@ async function digest(filename, onBytes) {
       hash.update(chunk);
       onBytes(chunk.length);
     }
-    return hash.digest('hex');
+    const after = await handle.stat();
+    if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs) return null;
+    return { sha256: hash.digest('hex'), stat };
   } finally { await handle.close(); }
 }
 
-function knownManifest(release) {
-  return validated.has(release) ? release : validateManifest(release);
+async function readSmallFile(root, relative) {
+  const installation = await installationRoot(root, false);
+  if (!installation.exists) return null;
+  const target = await destination(installation.root, relative, false, new Map());
+  if (!target.stat) return null;
+  return fs.readFile(target.filename);
 }
 
-export async function inspectRelease(root, release, onProgress = () => {}) {
-  const manifest = knownManifest(release);
+/** Atomically write launcher bookkeeping under the installation, never through symlinks. */
+async function writeSmallFile(root, relative, contents) {
+  const target = await destination(root, relative, true, new Map());
+  const temporary = `${target.filename}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporary, contents, { flag: 'wx', mode: 0o600 });
+    await fs.rename(temporary, target.filename);
+  } finally { await fs.rm(temporary, { force: true }); }
+}
+
+function emptyState() {
+  return { release: '', layers: [], files: new Map() };
+}
+
+/**
+ * Per-install verification state: { path: { size, mtimeMs, sha256 } } for files the launcher installed
+ * or hashed. A matching size and mtime lets Play trust the recorded hash without re-reading the file.
+ * The state is a cache: when it is missing or unreadable, files are hashed again.
+ */
+export async function readInstallState(root) {
+  try {
+    const bytes = await readSmallFile(root, STATE_FILE);
+    const value = bytes && JSON.parse(bytes.toString('utf8'));
+    if (!value || value.stateVersion !== 1 || !value.files || typeof value.files !== 'object') return emptyState();
+    const files = new Map();
+    for (const [name, entry] of Object.entries(value.files)) {
+      if (entry && Number.isSafeInteger(entry.size) && Number.isFinite(entry.mtimeMs) && typeof entry.sha256 === 'string') {
+        files.set(name, { size: entry.size, mtimeMs: entry.mtimeMs, sha256: entry.sha256 });
+      }
+    }
+    return { release: typeof value.release === 'string' ? value.release : '', layers: Array.isArray(value.layers) ? value.layers : [], files };
+  } catch {
+    return emptyState();
+  }
+}
+
+async function writeInstallState(root, release, files) {
+  const value = {
+    stateVersion: 1,
+    release: release.version,
+    layers: release.layers.map(({ name, version, sha256: digestValue }) => ({ name, version, sha256: digestValue })),
+    files: Object.fromEntries(release.files.filter((file) => files.has(file.path)).map((file) => [file.path, files.get(file.path)])),
+  };
+  await writeSmallFile(root, STATE_FILE, JSON.stringify(value));
+}
+
+const layerCachePath = (digestValue) => `${LAYER_CACHE}/${digestValue}.json`;
+
+async function cachedLayer(installDir, reference, requestUrl) {
+  if (!installDir) return null;
+  try {
+    const bytes = await readSmallFile(installDir, layerCachePath(reference.sha256));
+    if (!bytes) return null;
+    const value = JSON.parse(bytes.toString('utf8'));
+    if (value?.requestUrl !== requestUrl || typeof value.finalUrl !== 'string' || typeof value.body !== 'string') return null;
+    const body = Buffer.from(value.body, 'utf8');
+    if (sha256(body) !== reference.sha256) return null;
+    networkURL(value.finalUrl);
+    return { bytes: body, finalUrl: value.finalUrl };
+  } catch { return null; }
+}
+
+/** Keep verified layer manifests so unchanged layers are not downloaded again; drop stale ones. */
+async function writeLayerCache(root, release) {
+  const info = loaded.get(release);
+  if (!info?.layerSources.length) return;
+  const keep = new Set();
+  for (const source of info.layerSources) {
+    keep.add(`${source.sha256}.json`);
+    if (source.cached) continue;
+    await writeSmallFile(root, layerCachePath(source.sha256), JSON.stringify({ requestUrl: source.requestUrl, finalUrl: source.finalUrl, body: source.bytes.toString('utf8') }));
+  }
+  const directory = path.join(root, ...LAYER_CACHE.split('/'));
+  for (const entry of await fs.readdir(directory)) {
+    if (!keep.has(entry) && entry.endsWith('.json')) await fs.rm(path.join(directory, entry), { force: true });
+  }
+}
+
+/**
+ * Load a release. schemaVersion 2 releases fetch each layer manifest (verified against the
+ * top-level SHA-256) unless an identical layer manifest is cached in `installDir`.
+ */
+export async function loadRelease(feedUrl, { installDir } = {}) {
+  const top = await readJSON(networkURL(feedUrl), 'release manifest');
+  const manifest = validateManifest(parseJSON(top.bytes, 'release manifest'));
+  let files;
+  const layers = [];
+  const layerSources = [];
+  if (manifest.schemaVersion === 1) {
+    files = manifest.files.map((file) => ({ ...file, url: new URL(file.url, top.finalUrl).href, layer: '' }));
+  } else {
+    const parts = [];
+    for (const reference of manifest.layers) {
+      const requestUrl = new URL(reference.manifestUrl, top.finalUrl).href;
+      let source = await cachedLayer(installDir, reference, requestUrl);
+      const cached = Boolean(source);
+      if (!source) {
+        source = await readJSON(requestUrl, `layer manifest ${reference.name}`);
+        if (sha256(source.bytes) !== reference.sha256) throw new Error(`Layer manifest ${reference.name}@${reference.version} failed SHA-256 verification.`);
+      }
+      const layer = validateLayerManifest(parseJSON(source.bytes, `layer manifest ${reference.name}`), reference);
+      parts.push({ name: layer.layer, files: layer.files.map((file) => ({ ...file, url: new URL(file.url, source.finalUrl).href })) });
+      layers.push(Object.freeze({ name: reference.name, version: reference.version, sha256: reference.sha256, cached }));
+      layerSources.push({ sha256: reference.sha256, requestUrl, finalUrl: source.finalUrl, bytes: source.bytes, cached });
+    }
+    files = mergeLayers(parts);
+    if (!files.some((file) => file.path === manifest.launch.executable)) throw new Error('Launch executable must be listed with identical spelling in a release layer.');
+  }
+  const release = Object.freeze({
+    schemaVersion: manifest.schemaVersion,
+    version: manifest.version,
+    launch: manifest.launch,
+    playerOwned: manifest.playerOwned ?? Object.freeze([]),
+    ...(manifest.news ? { news: manifest.news } : {}),
+    layers: Object.freeze(layers),
+    files: Object.freeze(files.map((file) => Object.freeze(file))),
+  });
+  loaded.set(release, { layerSources });
+  return release;
+}
+
+/** Accept loaded releases, or a raw schemaVersion 1 manifest for inspection only. */
+function knownRelease(release) {
+  if (loaded.has(release)) return release;
+  const manifest = validated.has(release) ? release : validateManifest(release);
+  if (manifest.schemaVersion !== 1) throw new Error('Load a layered release with loadRelease before inspecting it.');
+  return { ...manifest, playerOwned: manifest.playerOwned ?? [], layers: [], files: manifest.files.map((file) => ({ ...file, layer: '' })) };
+}
+
+async function pool(count, limit, worker) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, count) }, async () => {
+    while (next < count) await worker(next++);
+  }));
+}
+
+/**
+ * Compare the installation with a release.
+ * mode 'fast' (Play/Update): files whose size and mtime match the install state are trusted without hashing.
+ * mode 'full' (Repair): every present file of the right size is SHA-256 hashed.
+ * Player-owned files only need to exist in either mode.
+ */
+async function inspect(root, release, onProgress, mode) {
+  if (mode !== 'fast' && mode !== 'full') throw new Error(`Unknown verification mode: ${mode}`);
   const cache = new Map();
   const installation = await installationRoot(root, false, cache);
-  const files = [];
-  let bytes = 0;
-  let bytesDone = 0;
+  const state = installation.exists ? await readInstallState(installation.root) : emptyState();
+  const owned = new Set(release.playerOwned.map(windowsKey));
+  const verified = new Map();
+  const pending = new Set();
+  const existing = new Set();
+  const toHash = [];
   let filesDone = 0;
-  const bytesTotal = manifest.files.reduce((sum, file) => sum + file.size, 0);
-  const progress = (message) => onProgress({ message, filesDone, filesTotal: manifest.files.length, bytesDone, bytesTotal });
-  progress('Checking installed files…');
-  for (const file of manifest.files) {
+  const filesTotal = release.files.length;
+  const report = (message, bytesDone = 0, bytesTotal = 0) => onProgress({ message, filesDone, filesTotal, bytesDone, bytesTotal });
+  report('Checking installed files…');
+  for (const file of release.files) {
     const current = installation.exists ? await destination(installation.root, file.path, false, cache) : null;
-    let matches = false;
-    if (current?.stat?.size === file.size) {
-      const checksum = await digest(current.filename, (count) => {
-        bytesDone += count;
-        progress(`Checking ${file.path}`);
-      });
-      matches = checksum === file.sha256;
-    }
-    if (!matches) { files.push(file); bytes += file.size; }
+    const stat = current?.stat;
+    const entry = state.files.get(file.path);
+    if (stat) existing.add(file.path);
+    if (!stat) pending.add(file.path);
+    else if (owned.has(windowsKey(file.path))) { /* the player's copy is kept as-is */ }
+    else if (stat.size !== file.size) pending.add(file.path);
+    else if (mode === 'fast' && entry && entry.size === stat.size && entry.mtimeMs === stat.mtimeMs) {
+      if (entry.sha256 === file.sha256) verified.set(file.path, entry);
+      else pending.add(file.path);
+    } else toHash.push({ file, filename: current.filename });
     filesDone += 1;
-    progress(`Checked ${file.path}`);
+    if (filesDone % 500 === 0) report('Checking installed files…');
   }
-  return { files, bytes };
+  const bytesTotal = toHash.reduce((sum, item) => sum + item.file.size, 0);
+  let bytesDone = 0;
+  filesDone = filesTotal - toHash.length;
+  await pool(toHash.length, 4, async (index) => {
+    const { file, filename } = toHash[index];
+    const result = await digest(filename, (count) => { bytesDone += count; report(`Verifying ${file.path}`, bytesDone, bytesTotal); });
+    if (result?.sha256 === file.sha256) verified.set(file.path, { size: result.stat.size, mtimeMs: result.stat.mtimeMs, sha256: file.sha256 });
+    else pending.add(file.path);
+    filesDone += 1;
+    report(`Verified ${file.path}`, bytesDone, bytesTotal);
+  });
+  const files = release.files.filter((file) => pending.has(file.path));
+  return {
+    files, bytes: files.reduce((sum, file) => sum + file.size, 0), hashed: toHash.length, verified, existing, installation,
+    stateChanged: toHash.length > 0 || state.release !== release.version,
+  };
 }
 
-async function download(file, url, target, onBytes, signal) {
-  const response = await request(url, signal);
+/** Returns { files, bytes, hashed }: the files that need downloading and how many files were hashed. */
+export async function inspectRelease(root, release, onProgress = () => {}, { mode = 'fast' } = {}) {
+  const known = knownRelease(release);
+  const result = await inspect(root, known, onProgress, mode);
+  if (result.installation.exists && result.stateChanged && loaded.has(known)) {
+    // Recording newly hashed files keeps the next Play fast; the state is only a cache.
+    try { await writeInstallState(result.installation.root, known, result.verified); } catch { /* the next check hashes again */ }
+  }
+  return { files: result.files, bytes: result.bytes, hashed: result.hashed };
+}
+
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  if (signal.aborted) { reject(signal.reason); return; }
+  const abort = () => { clearTimeout(timer); reject(signal.reason); };
+  const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, ms);
+  signal.addEventListener('abort', abort, { once: true });
+});
+
+async function download(file, target, onBytes, signal) {
+  const { response } = await request(file.url, signal);
   const hash = createHash('sha256');
   let size = 0;
   const verify = new Transform({
     transform(chunk, encoding, callback) {
       size += chunk.length;
-      if (size > file.size) return callback(new Error(`Download exceeds declared size: ${file.path}.`));
+      if (size > file.size) return callback(permanent(new Error(`Download exceeds declared size: ${file.path}.`)));
       hash.update(chunk);
       try { onBytes(chunk.length); } catch (error) { callback(error); return; }
       callback(null, chunk);
@@ -278,59 +603,102 @@ async function download(file, url, target, onBytes, signal) {
   });
   const body = response.body ? Readable.fromWeb(response.body) : Readable.from([]);
   await pipeline(body, verify, createWriteStream(target, { flags: 'wx', mode: 0o600 }), { signal });
-  if (size !== file.size || hash.digest('hex') !== file.sha256) throw new Error(`Downloaded file failed size/SHA-256 verification: ${file.path}.`);
+  // A short body is usually a dropped connection and is retried; a full-size mismatch is not.
+  if (size < file.size) throw new Error(`Download ended early: ${file.path}.`);
+  if (hash.digest('hex') !== file.sha256) throw permanent(new Error(`Downloaded file failed size/SHA-256 verification: ${file.path}.`));
 }
 
-export async function installRelease(root, release, onProgress = () => {}) {
-  const manifest = knownManifest(release);
-  const pending = await inspectRelease(root, manifest, onProgress);
-  if (!pending.files.length) return pending;
-  const base = origins.get(release);
-  if (!base) throw new Error('Load the release from its manifest URL before downloading files.');
+/**
+ * Download and install missing or changed files (mode 'full' hashes every file first, for Repair).
+ * Every download is verified in staging before it is moved into place. Files that did not exist are
+ * committed as soon as they verify, so an interrupted first install resumes where it stopped; files
+ * that replace existing ones are committed only after every download has verified.
+ */
+export async function installRelease(root, release, onProgress = () => {}, options = {}) {
+  const { mode = 'fast', concurrency = DEFAULT_CONCURRENCY, retries = 4, retryDelayMs = 500 } = options;
+  if (!loaded.has(release)) throw new Error('Load the release from its manifest URL before downloading files.');
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > MAX_CONCURRENCY) throw new Error(`Concurrency must be 1-${MAX_CONCURRENCY}.`);
+  const pending = await inspect(root, release, onProgress, mode);
+  const result = { files: pending.files, bytes: pending.bytes, hashed: pending.hashed };
   const installation = await installationRoot(root, true);
-  const stage = await fs.mkdtemp(path.join(installation.root, '.mapleroot-stage-'));
-  const staged = [];
+  const verified = pending.verified;
+  const saveState = () => writeInstallState(installation.root, release, verified);
+  if (!pending.files.length) {
+    await saveState();
+    await writeLayerCache(installation.root, release);
+    return result;
+  }
+  const stage = await fs.mkdtemp(path.join(installation.root, STAGE_PREFIX));
+  const cache = new Map();
+  await installationRoot(installation.root, false, cache);
+  const deferred = [];
   let bytesDone = 0;
   let filesDone = 0;
+  let lastCheckpoint = Date.now();
+  let checkpoint = Promise.resolve();
+  let complete = false;
   const progress = (message) => onProgress({ message, filesDone, filesTotal: pending.files.length, bytesDone, bytesTotal: pending.bytes });
-  try {
-    progress('Downloading verified update files…');
-    const controller = new AbortController();
-    let next = 0;
-    let failure;
-    async function transferFiles() {
-      while (!controller.signal.aborted) {
-        const index = next++;
-        if (index >= pending.files.length) return;
-        const file = pending.files[index];
-        const temporary = path.join(stage, randomUUID());
-        try {
-          await download(file, new URL(file.url, base), temporary, (count) => {
-            bytesDone += count;
-            progress(`Downloading ${file.path}`);
-          }, controller.signal);
-          staged[index] = { file, temporary };
-          filesDone += 1;
-          progress(`Verified ${file.path}`);
-        } catch (error) {
-          if (!failure) { failure = error; controller.abort(); }
-          return;
-        }
+  async function commit(file, temporary) {
+    const target = await destination(installation.root, file.path, true, cache);
+    await fs.rename(temporary, target.filename);
+    cache.get(path.dirname(target.filename))?.set(windowsKey(path.basename(target.filename)), path.basename(target.filename));
+    const stat = await fs.lstat(target.filename);
+    verified.set(file.path, { size: stat.size, mtimeMs: stat.mtimeMs, sha256: file.sha256 });
+  }
+  const controller = new AbortController();
+  async function transfer(file) {
+    let temporary;
+    for (let attempt = 0; ; attempt += 1) {
+      temporary = path.join(stage, randomUUID());
+      let received = 0;
+      try {
+        await download(file, temporary, (count) => {
+          received += count;
+          bytesDone += count;
+          progress(`Downloading ${file.path}`);
+        }, controller.signal);
+        break;
+      } catch (error) {
+        bytesDone -= received;
+        await fs.rm(temporary, { force: true });
+        if (controller.signal.aborted || error.permanent || attempt >= retries) throw error;
+        progress(`Retrying ${file.path}`);
+        await sleep(retryDelayMs * 2 ** attempt + Math.random() * retryDelayMs, controller.signal);
       }
     }
-    await Promise.all(Array.from({ length: Math.min(6, pending.files.length) }, transferFiles));
+    if (pending.existing.has(file.path)) deferred.push({ file, temporary });
+    else await commit(file, temporary);
+    filesDone += 1;
+    progress(`Verified ${file.path}`);
+    if (Date.now() - lastCheckpoint > STATE_CHECKPOINT_MS) {
+      lastCheckpoint = Date.now();
+      checkpoint = checkpoint.then(saveState, saveState);
+    }
+  }
+  try {
+    progress('Downloading verified update files…');
+    let failure;
+    await pool(pending.files.length, concurrency, async (index) => {
+      if (controller.signal.aborted) return;
+      try { await transfer(pending.files[index]); } catch (error) {
+        if (!failure) { failure = error; controller.abort(); }
+      }
+    });
     if (failure) throw failure;
-    // No destination is replaced until every download has passed verification.
-    const cache = new Map();
-    await installationRoot(installation.root, false, cache);
-    for (const { file, temporary } of staged) {
-      const target = await destination(installation.root, file.path, true, cache);
-      await fs.rename(temporary, target.filename);
-      cache.get(path.dirname(target.filename))?.set(windowsKey(path.basename(target.filename)), path.basename(target.filename));
+    // No existing file is replaced until every download has passed verification.
+    for (const { file, temporary } of deferred) {
+      await commit(file, temporary);
       progress(`Installed ${file.path}`);
     }
-    return pending;
+    await checkpoint.catch(() => {});
+    await saveState();
+    await writeLayerCache(installation.root, release);
+    complete = true;
+    return result;
   } finally {
+    await checkpoint.catch(() => {});
+    // Record files committed before a failure so a resumed install need not hash them again.
+    if (!complete) await saveState().catch(() => {});
     await fs.rm(stage, { recursive: true, force: true });
   }
 }

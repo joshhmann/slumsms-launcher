@@ -11,7 +11,7 @@ const page = pathToFileURL(path.join(here, 'index.html')).href;
 let window;
 // settings.json holds only the player's overrides; launcher.config.json supplies the defaults.
 let settings = { feedUrl: '', installDir: '' };
-let config = { feedUrl: '', clientExecutable: '' };
+let config = { feedUrl: '', clientExecutable: '', downloadConcurrency: 12 };
 let bundledDir = '';
 let busy = false;
 let state = { phase: 'idle', message: 'Checking for updates…', canPlay: false };
@@ -53,13 +53,22 @@ async function operation(phase, action) {
   catch (error) { send({ phase: 'error', message: error.message, canPlay: false }); throw error; }
   finally { busy = false; }
 }
-const progress = (value) => send(value);
-async function checkRelease() {
+// Progress arrives per downloaded chunk; forward at most ~10 updates a second to the page.
+// Only counts and a short message cross IPC, never the release file list.
+let lastProgress = 0;
+function progress(value) {
+  const now = Date.now();
+  if (now - lastProgress < 100 && value.filesDone !== value.filesTotal) return;
+  lastProgress = now;
+  send({ message: value.message, filesDone: value.filesDone, filesTotal: value.filesTotal, bytesDone: value.bytesDone, bytesTotal: value.bytesTotal });
+}
+// mode 'fast' trusts files whose size and mtime match the install state; 'full' (Repair) hashes everything.
+async function checkRelease(mode = 'fast') {
   const { feedUrl, installDir } = requireSettings();
-  const release = await loadRelease(feedUrl);
+  const release = await loadRelease(feedUrl, { installDir });
   send({ version: release.version, news: release.news ?? [], message: 'Verifying installed client files.' });
   const fresh = !(await exists(path.resolve(installDir, ...release.launch.executable.split('/'))));
-  const pending = await inspectRelease(installDir, release, progress);
+  const pending = await inspectRelease(installDir, release, progress, { mode });
   send({ phase: pending.files.length ? 'needs-update' : 'ready', canPlay: !pending.files.length, fresh: fresh && pending.files.length > 0,
     pendingFiles: pending.files.length, pendingBytes: pending.bytes,
     message: pending.files.length ? `${pending.files.length} files need installing or repair.` : 'All release files verified. Ready to play.' });
@@ -156,13 +165,15 @@ else {
       if (failure) throw new Error(failure);
     });
     handle('check', () => operation('checking', checkRelease).then(() => undefined));
-    handle('update', () => operation('updating', async () => {
+    const install = mode => operation('updating', async () => {
       const { feedUrl, installDir } = requireSettings();
-      const release = await loadRelease(feedUrl);
-      send({ version: release.version, news: release.news ?? [], message: 'Installing missing or changed files.' });
-      await installRelease(installDir, release, progress);
+      const release = await loadRelease(feedUrl, { installDir });
+      send({ version: release.version, news: release.news ?? [], message: mode === 'full' ? 'Verifying every file and repairing damage.' : 'Installing missing or changed files.' });
+      await installRelease(installDir, release, progress, { mode, concurrency: config.downloadConcurrency });
       await checkRelease();
-    }));
+    });
+    handle('update', () => install('fast'));
+    handle('repair', () => install('full'));
     handle('play', () => operation('checking', async () => {
       const { release, pending } = await checkRelease();
       if (pending.files.length) throw new Error('Install or repair the pending files before playing.');

@@ -1,4 +1,5 @@
 {
-  "feedUrl": "https://example.com/manifest.json",
-  "clientExecutable": "MapleStory.exe"
+  "feedUrl": "https://slumspatch.asslorde.com/manifest.json",
+  "clientExecutable": "SlumsMS.exe",
+  "downloadConcurrency": 12
 }

@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('launcher', {
   openFolder: invoke('openFolder'),
   check: invoke('check'),
   update: invoke('update'),
+  repair: invoke('repair'),
   play: invoke('play'),
   onState(callback) {
     const listener = (_event, state) => callback(state);
