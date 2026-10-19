@@ -1,20 +1,34 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
-import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { loadRelease, inspectRelease, installRelease } from './updater.mjs';
+import { readLauncherConfig, detectBundledClient, standaloneInstallDir, validateFeedUrl } from './launcher-config.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const page = pathToFileURL(path.join(here, 'index.html')).href;
 let window;
+// settings.json holds only the player's overrides; launcher.config.json supplies the defaults.
 let settings = { feedUrl: '', installDir: '' };
+let config = { feedUrl: '', clientExecutable: '' };
+let bundledDir = '';
 let busy = false;
-let state = { phase: 'idle', message: 'Choose your release feed and installation folder.', canPlay: false };
+let state = { phase: 'idle', message: 'Checking for updates…', canPlay: false };
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
 
+function effective() {
+  return {
+    feedUrl: settings.feedUrl || config.feedUrl,
+    installDir: settings.installDir || bundledDir || standaloneInstallDir({ home: app.getPath('home') }),
+    defaultFeedUrl: config.feedUrl,
+    feedOverridden: Boolean(settings.feedUrl),
+    installDirSource: settings.installDir ? 'saved' : bundledDir ? 'bundled' : 'default',
+    appVersion: app.getVersion(),
+  };
+}
 function send(patch) {
-  state = { ...state, ...settings, ...patch };
+  state = { ...state, ...effective(), ...patch };
   if (window && !window.isDestroyed()) window.webContents.send('launcher:state', state);
 }
 async function persist() {
@@ -24,7 +38,12 @@ async function persist() {
   await rename(temporary, settingsFile());
 }
 function requireSettings() {
-  if (!settings.feedUrl || !settings.installDir) throw new Error('Choose a release feed and installation folder first.');
+  const current = effective();
+  if (!current.feedUrl || !current.installDir) throw new Error('Set an update server in Settings first.');
+  return current;
+}
+async function exists(file) {
+  try { await stat(file); return true; } catch { return false; }
 }
 async function operation(phase, action) {
   if (busy) throw new Error('A launcher operation is already running.');
@@ -36,11 +55,13 @@ async function operation(phase, action) {
 }
 const progress = (value) => send(value);
 async function checkRelease() {
-  requireSettings();
-  const release = await loadRelease(settings.feedUrl);
-  send({ version: release.version, message: 'Verifying installed client files.' });
-  const pending = await inspectRelease(settings.installDir, release, progress);
-  send({ phase: pending.files.length ? 'needs-update' : 'ready', canPlay: !pending.files.length,
+  const { feedUrl, installDir } = requireSettings();
+  const release = await loadRelease(feedUrl);
+  send({ version: release.version, news: release.news ?? [], message: 'Verifying installed client files.' });
+  const fresh = !(await exists(path.resolve(installDir, ...release.launch.executable.split('/'))));
+  const pending = await inspectRelease(installDir, release, progress);
+  send({ phase: pending.files.length ? 'needs-update' : 'ready', canPlay: !pending.files.length, fresh: fresh && pending.files.length > 0,
+    pendingFiles: pending.files.length, pendingBytes: pending.bytes,
     message: pending.files.length ? `${pending.files.length} files need installing or repair.` : 'All release files verified. Ready to play.' });
   return { release, pending };
 }
@@ -61,13 +82,14 @@ function windowsArgument(value) {
 }
 const psLiteral = value => "'" + value.replaceAll("'", "''") + "'";
 async function launch(release) {
-  const executable = path.resolve(settings.installDir, ...release.launch.executable.split('/'));
+  const { installDir } = effective();
+  const executable = path.resolve(installDir, ...release.launch.executable.split('/'));
   if (process.platform === 'win32') {
     const argumentsLine = release.launch.args.map(windowsArgument).join(' ');
-    const command = `$ErrorActionPreference='Stop'; Start-Process -FilePath ${psLiteral(executable)} -WorkingDirectory ${psLiteral(settings.installDir)}${argumentsLine ? ` -ArgumentList ${psLiteral(argumentsLine)}` : ''}`;
+    const command = `$ErrorActionPreference='Stop'; Start-Process -FilePath ${psLiteral(executable)} -WorkingDirectory ${psLiteral(installDir)}${argumentsLine ? ` -ArgumentList ${psLiteral(argumentsLine)}` : ''}`;
     await runProcess('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], { windowsHide: true }, true);
   } else {
-    await runProcess(executable, release.launch.args, { cwd: settings.installDir, detached: true });
+    await runProcess(executable, release.launch.args, { cwd: installDir, detached: true });
   }
 }
 function handle(name, action) {
@@ -89,6 +111,12 @@ else {
       const value = process.argv.find(argument => argument.startsWith(flag));
       if (value) settings[key] = value.slice(flag.length);
     }
+    // Built-in defaults ship in the app; an optional launcher.config.json beside the packaged exe overrides them.
+    const launcherDir = path.dirname(app.getPath('exe'));
+    try {
+      config = await readLauncherConfig([path.join(here, 'launcher.config.json'), ...(app.isPackaged ? [path.join(launcherDir, 'launcher.config.json')] : [])]);
+    } catch (error) { state = { ...state, phase: 'error', message: error.message }; }
+    if (app.isPackaged) bundledDir = await detectBundledClient(launcherDir, config.clientExecutable);
     window = new BrowserWindow({ width: 1060, height: 860, minWidth: 860, minHeight: 700, backgroundColor: '#16203a',
       webPreferences: { preload: path.join(here, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
     window.on('close', event => {
@@ -98,30 +126,41 @@ else {
     });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.on('will-navigate', event => event.preventDefault());
-    handle('settings', () => { send({}); return { ...settings }; });
+    handle('settings', () => { send({}); return effective(); });
     handle('saveFeed', async value => {
       if (busy) throw new Error('Wait for the current operation to finish.');
-      const url = new URL(value);
-      if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) throw new Error('Use HTTPS, or HTTP on localhost for development.');
-      settings.feedUrl = url.href; await persist();
-      send({ phase: 'idle', message: 'Release feed saved. Check files to continue.', canPlay: false, version: undefined });
-      return { ...settings };
+      const href = validateFeedUrl(value);
+      settings.feedUrl = href === config.feedUrl ? '' : href; await persist();
+      send({ phase: 'idle', message: 'Update server saved.', canPlay: false, version: undefined, news: [] });
+      return effective();
+    });
+    handle('resetFeed', async () => {
+      if (busy) throw new Error('Wait for the current operation to finish.');
+      settings.feedUrl = ''; await persist();
+      send({ phase: 'idle', message: 'Update server reset to the default.', canPlay: false, version: undefined, news: [] });
+      return effective();
     });
     handle('chooseFolder', async () => {
       if (busy) throw new Error('Wait for the current operation to finish.');
-      const result = await dialog.showOpenDialog(window, { title: 'Choose SlumsMS installation folder', properties: ['openDirectory', 'createDirectory'], defaultPath: settings.installDir || app.getPath('documents') });
+      const result = await dialog.showOpenDialog(window, { title: 'Choose SlumsMS game folder', properties: ['openDirectory', 'createDirectory'], defaultPath: effective().installDir });
       if (!result.canceled) {
         settings.installDir = result.filePaths[0]; await persist();
-        send({ phase: 'idle', message: 'Installation folder saved. Check files to continue.', canPlay: false });
+        send({ phase: 'idle', message: 'Game folder saved.', canPlay: false });
       }
-      return { ...settings };
+      return effective();
+    });
+    handle('openFolder', async () => {
+      const { installDir } = effective();
+      if (!(await exists(installDir))) throw new Error('The game folder does not exist yet. Install the game first.');
+      const failure = await shell.openPath(installDir);
+      if (failure) throw new Error(failure);
     });
     handle('check', () => operation('checking', checkRelease).then(() => undefined));
     handle('update', () => operation('updating', async () => {
-      requireSettings();
-      const release = await loadRelease(settings.feedUrl);
-      send({ version: release.version, message: 'Installing missing or changed files.' });
-      await installRelease(settings.installDir, release, progress);
+      const { feedUrl, installDir } = requireSettings();
+      const release = await loadRelease(feedUrl);
+      send({ version: release.version, news: release.news ?? [], message: 'Installing missing or changed files.' });
+      await installRelease(installDir, release, progress);
       await checkRelease();
     }));
     handle('play', () => operation('checking', async () => {

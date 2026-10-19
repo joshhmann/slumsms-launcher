@@ -1,9 +1,11 @@
 const elements = Object.fromEntries([
-  'phase-badge', 'phase-label', 'status-heading', 'status-message',
-  'release-version', 'progress-area', 'progress-label', 'progress-detail',
-  'operation-progress', 'feed-form', 'feed-url', 'feed-notice', 'save-feed',
-  'install-dir', 'choose-folder', 'check-files', 'install-update', 'play',
-  'play-label', 'action-help', 'error-message',
+  'phase-badge', 'phase-label', 'status-eyebrow', 'status-heading', 'status-message',
+  'install-target', 'install-target-path', 'change-folder-inline', 'release-version',
+  'news', 'news-list', 'progress-area', 'progress-label', 'progress-detail', 'operation-progress',
+  'action-help', 'play', 'play-label', 'error-message', 'open-settings', 'settings-dialog',
+  'close-settings', 'install-dir', 'folder-source', 'choose-folder', 'open-folder', 'repair-files',
+  'feed-form', 'feed-url', 'feed-help', 'feed-notice', 'save-feed', 'reset-feed', 'settings-error',
+  'version-info',
 ].map((id) => [id, document.getElementById(id)]));
 
 const phaseNames = {
@@ -25,31 +27,29 @@ const phaseHeadings = {
   error: 'Let’s get you back on track.',
 };
 const busyPhases = new Set(['checking', 'updating', 'launching']);
+const bridgeMethods = ['settings', 'saveFeed', 'resetFeed', 'chooseFolder', 'openFolder', 'check', 'update', 'play', 'onState'];
 const bridge = window.launcher;
-const bridgeAvailable = ['settings', 'saveFeed', 'chooseFolder', 'check', 'update', 'play', 'onState']
-  .every((method) => typeof bridge?.[method] === 'function');
-const configuration = { feedUrl: '', installDir: '' };
+const bridgeAvailable = bridgeMethods.every((method) => typeof bridge?.[method] === 'function');
+const configuration = { feedUrl: '', installDir: '', defaultFeedUrl: '', feedOverridden: false, installDirSource: 'default', appVersion: '' };
 let state = { phase: 'idle', message: 'Loading launcher settings…', canPlay: false };
 let initialized = false;
 let operation = null;
 let errorMessage = '';
 let validationMessage = '';
+let renderedNews = '';
 let unsubscribe;
 
 function hasUnsavedFeed() {
   return elements['feed-url'].value.trim() !== configuration.feedUrl;
 }
 
-function applySettings(settings, { forceFeed = false, invalidate = false } = {}) {
-  const previousFeed = configuration.feedUrl;
-  const previousDirectory = configuration.installDir;
+/** Copy settings from the main process. */
+function applySettings(settings, { forceFeed = false } = {}) {
   const preserveDraft = hasUnsavedFeed();
-  if (typeof settings.feedUrl === 'string') configuration.feedUrl = settings.feedUrl;
-  if (typeof settings.installDir === 'string') configuration.installDir = settings.installDir;
-  if (forceFeed || !preserveDraft) elements['feed-url'].value = configuration.feedUrl;
-  if (invalidate && (previousFeed !== configuration.feedUrl || previousDirectory !== configuration.installDir)) {
-    state = { phase: 'idle', message: 'Settings changed. Check your client files to continue.', canPlay: false };
+  for (const key of Object.keys(configuration)) {
+    if (typeof settings[key] === typeof configuration[key]) configuration[key] = settings[key];
   }
+  if (forceFeed || !preserveDraft) elements['feed-url'].value = configuration.feedUrl;
 }
 
 function receiveState(nextState) {
@@ -80,12 +80,13 @@ function isCount(value) {
 function renderProgress() {
   const visible = state.phase === 'checking' || state.phase === 'updating';
   elements['progress-area'].hidden = !visible;
+  elements['action-help'].hidden = visible;
   if (!visible) {
     elements['operation-progress'].removeAttribute('value');
     elements['progress-detail'].textContent = '';
     return;
   }
-  elements['progress-label'].textContent = state.phase === 'checking' ? 'Verifying client files' : 'Installing client files';
+  elements['progress-label'].textContent = state.phase === 'checking' ? 'Verifying game files' : state.fresh ? 'Installing SlumsMS' : 'Downloading update';
   const details = [];
   if (isCount(state.filesDone) && isCount(state.filesTotal)) {
     details.push(`${state.filesDone.toLocaleString()} / ${state.filesTotal.toLocaleString()} files`);
@@ -104,48 +105,128 @@ function renderProgress() {
   }
 }
 
+/** Release notes come from the manifest and are rendered strictly as text. */
+function renderNews() {
+  const news = Array.isArray(state.news) ? state.news : [];
+  const key = JSON.stringify(news);
+  if (key === renderedNews) return;
+  renderedNews = key;
+  const list = elements['news-list'];
+  list.replaceChildren(...news.map((entry) => {
+    const item = document.createElement('li');
+    item.className = 'news-item';
+    const head = document.createElement('div');
+    head.className = 'news-head';
+    const title = document.createElement('span');
+    title.className = 'news-title';
+    title.textContent = entry.title;
+    head.append(title);
+    if (entry.date) {
+      const date = document.createElement('time');
+      date.className = 'news-date';
+      date.dateTime = entry.date;
+      date.textContent = entry.date;
+      head.append(date);
+    }
+    item.append(head);
+    if (entry.body) {
+      const body = document.createElement('p');
+      body.className = 'news-body';
+      body.textContent = entry.body;
+      item.append(body);
+    }
+    return item;
+  }));
+  elements.news.hidden = news.length === 0;
+}
+
+function primaryAction() {
+  if (!configuration.feedUrl) return { kind: 'settings', label: 'Open settings', run: openSettings };
+  if (state.phase === 'ready' && state.canPlay) return { kind: 'play', label: 'Play', run: () => perform('play', () => bridge.play()) };
+  if (state.phase === 'needs-update') {
+    return { kind: 'update', label: state.fresh ? 'Install' : 'Update', run: () => perform('update', () => bridge.update()) };
+  }
+  return { kind: 'check', label: state.phase === 'error' ? 'Try again' : 'Check for updates', run: checkNow };
+}
+
+function busyLabel() {
+  if (operation === 'play' || state.phase === 'launching') return 'Launching…';
+  if (state.phase === 'updating' || operation === 'update') return state.fresh ? 'Installing…' : 'Updating…';
+  if (state.phase === 'checking' || operation === 'check') return 'Checking…';
+  return 'Working…';
+}
+
 function render() {
-  const dirty = hasUnsavedFeed();
   const busy = operation !== null || busyPhases.has(state.phase);
   const blocked = !bridgeAvailable || !initialized || busy;
-  const configured = Boolean(configuration.feedUrl && configuration.installDir);
-  const canOperate = !blocked && configured && !dirty;
   const phase = state.phase;
+  const fresh = phase === 'needs-update' && state.fresh;
+  const action = primaryAction();
 
   elements['phase-badge'].dataset.phase = phase;
-  elements['phase-label'].textContent = !initialized && bridgeAvailable ? 'Starting' : phaseNames[phase];
-  elements['status-heading'].textContent = phaseHeadings[phase];
-  elements['status-message'].textContent = phase === 'error'
-    ? 'The operation could not be completed. See the details below.'
-    : state.message;
+  elements['phase-label'].textContent = !initialized && bridgeAvailable ? 'Starting' : fresh ? 'Not installed' : phaseNames[phase];
+  elements['status-eyebrow'].textContent = fresh ? 'FIRST TIME SETUP'
+    : phase === 'needs-update' ? 'UPDATE AVAILABLE'
+      : phase === 'error' ? 'SOMETHING WENT WRONG' : 'YOUR NEXT ADVENTURE';
+  elements['status-heading'].textContent = fresh ? 'Install SlumsMS' : phaseHeadings[phase];
+  let message = state.message;
+  if (phase === 'error') message = 'The operation could not be completed. See the details below.';
+  else if (initialized && !configuration.feedUrl) message = 'No update server is set yet.';
+  else if (phase === 'needs-update' && isCount(state.pendingFiles) && isCount(state.pendingBytes)) {
+    message = `${state.pendingFiles.toLocaleString()} files, ${formatBytes(state.pendingBytes)} to download.`;
+  }
+  elements['status-message'].textContent = message;
+  elements['install-target'].hidden = !fresh;
+  elements['install-target-path'].textContent = configuration.installDir;
+  elements['change-folder-inline'].disabled = blocked;
   elements['release-version'].textContent = state.version || 'Not checked';
+  renderNews();
+
+  elements.play.dataset.action = action.kind;
+  elements.play.disabled = blocked;
+  elements['play-label'].textContent = busy ? busyLabel() : action.label;
+
+  const dialogOpen = elements['settings-dialog'].open;
+  elements['error-message'].hidden = !errorMessage || dialogOpen;
+  elements['error-message'].textContent = errorMessage;
+  elements['settings-error'].hidden = !errorMessage || !dialogOpen;
+  elements['settings-error'].textContent = errorMessage;
+
   elements['install-dir'].textContent = configuration.installDir || 'No folder selected';
   elements['install-dir'].title = configuration.installDir;
+  elements['folder-source'].textContent = {
+    bundled: 'Found next to the launcher.',
+    saved: 'Chosen by you.',
+    default: 'Default location for this PC.',
+  }[configuration.installDirSource] ?? '';
+  elements['choose-folder'].disabled = blocked;
+  elements['choose-folder'].textContent = operation === 'folder' ? 'Choosing…' : 'Change folder';
+  elements['open-folder'].disabled = !bridgeAvailable || !configuration.installDir;
+  elements['repair-files'].disabled = blocked || !configuration.feedUrl;
+  const dirty = hasUnsavedFeed();
   elements['feed-url'].disabled = blocked;
   elements['save-feed'].disabled = blocked || !dirty;
-  elements['save-feed'].textContent = operation === 'save' ? 'Saving…' : 'Save source';
-  elements['choose-folder'].disabled = blocked;
-  elements['choose-folder'].textContent = operation === 'folder' ? 'Choosing…' : 'Choose folder';
-  elements['check-files'].disabled = !canOperate;
-  elements['check-files'].textContent = operation === 'check' || phase === 'checking' ? 'Checking files…' : 'Check files / repair';
-  elements['install-update'].disabled = !canOperate || state.canPlay;
-  elements['install-update'].textContent = operation === 'update' || phase === 'updating' ? 'Installing…' : 'Install / update';
-  elements.play.disabled = !canOperate || !state.canPlay;
-  elements['play-label'].textContent = operation === 'play' || phase === 'launching' ? 'Launching…' : 'Play';
-  elements['feed-notice'].textContent = validationMessage || (dirty ? 'Unsaved source. Save it before checking, updating, or playing.' : '');
+  elements['save-feed'].textContent = operation === 'save' ? 'Saving…' : 'Save';
+  elements['reset-feed'].hidden = !configuration.feedOverridden || !configuration.defaultFeedUrl;
+  elements['reset-feed'].disabled = blocked;
+  elements['feed-help'].textContent = configuration.feedOverridden && configuration.defaultFeedUrl
+    ? `Using a custom server. Default: ${configuration.defaultFeedUrl}`
+    : 'Only change this if your server staff gave you a different manifest URL.';
+  elements['feed-notice'].textContent = validationMessage || (dirty ? 'Unsaved. Press Save to use this server.' : '');
   elements['feed-url'].setAttribute('aria-invalid', validationMessage ? 'true' : 'false');
-  elements['error-message'].hidden = !errorMessage;
-  elements['error-message'].textContent = errorMessage;
+  elements['version-info'].textContent = [configuration.appVersion && `Launcher ${configuration.appVersion}`, state.version && `Game ${state.version}`]
+    .filter(Boolean).join(' · ');
 
   let help;
   if (!bridgeAvailable) help = 'Open SlumsMS in the desktop launcher to manage your client.';
-  else if (!initialized) help = 'Reading your saved release source and install folder…';
-  else if (busy) help = 'Keep the launcher open while this operation completes.';
-  else if (dirty) help = 'Save the release source to use the client controls.';
-  else if (!configured) help = 'Save a release source and choose an install folder to get started.';
-  else if (state.canPlay) help = 'Your files match the checked release. You’re ready to play.';
-  else if (phase === 'needs-update') help = 'Install / update downloads the missing or changed files, then verifies your client.';
-  else help = 'Check files / repair verifies your installation. Install / update applies any needed repairs.';
+  else if (!initialized) help = 'Starting…';
+  else if (busy) help = 'Keep the launcher open while this finishes.';
+  else if (!configuration.feedUrl) help = 'Set the update server in Settings to get started.';
+  else if (phase === 'ready' && state.canPlay) help = 'All game files verified.';
+  else if (fresh) help = 'Install downloads the game, then checks every file.';
+  else if (phase === 'needs-update') help = 'Update downloads only the files that changed.';
+  else if (phase === 'error') help = 'Try again, or open Settings to repair files or change the game folder.';
+  else help = 'Check for updates to verify your game files.';
   elements['action-help'].textContent = help;
   renderProgress();
 }
@@ -163,6 +244,24 @@ async function perform(name, action) {
     operation = null;
     render();
   }
+}
+
+function checkNow() {
+  if (configuration.feedUrl) return perform('check', () => bridge.check());
+  return undefined;
+}
+
+/** Run a settings change, then re-check when the feed or folder actually changed. */
+async function changeSettings(name, action) {
+  // State broadcasts may apply the new settings before the call returns, so compare against a snapshot.
+  const before = `${configuration.feedUrl}\n${configuration.installDir}`;
+  await perform(name, async () => { applySettings(await action(), { forceFeed: true }); });
+  if (before !== `${configuration.feedUrl}\n${configuration.installDir}` && !errorMessage) await checkNow();
+}
+
+function openSettings() {
+  if (!elements['settings-dialog'].open) elements['settings-dialog'].showModal();
+  render();
 }
 
 function clearValidation() {
@@ -190,21 +289,24 @@ elements['feed-form'].addEventListener('submit', (event) => {
     return;
   }
   clearValidation();
-  void perform('save', async () => {
-    const settings = await bridge.saveFeed(url);
-    applySettings(settings, { forceFeed: true, invalidate: true });
-  });
+  void changeSettings('save', () => bridge.saveFeed(url));
 });
 
-elements['choose-folder'].addEventListener('click', () => {
-  void perform('folder', async () => {
-    const settings = await bridge.chooseFolder();
-    applySettings(settings, { invalidate: true });
-  });
+elements['reset-feed'].addEventListener('click', () => void changeSettings('save', () => bridge.resetFeed()));
+const chooseFolder = () => void changeSettings('folder', () => bridge.chooseFolder());
+elements['choose-folder'].addEventListener('click', chooseFolder);
+elements['change-folder-inline'].addEventListener('click', chooseFolder);
+elements['open-folder'].addEventListener('click', () => {
+  bridge.openFolder().then(() => { errorMessage = ''; render(); }, fail);
 });
-elements['check-files'].addEventListener('click', () => void perform('check', () => bridge.check()));
-elements['install-update'].addEventListener('click', () => void perform('update', () => bridge.update()));
-elements.play.addEventListener('click', () => void perform('play', () => bridge.play()));
+elements['repair-files'].addEventListener('click', () => {
+  elements['settings-dialog'].close();
+  void perform('update', () => bridge.update());
+});
+elements['open-settings'].addEventListener('click', openSettings);
+elements['close-settings'].addEventListener('click', () => elements['settings-dialog'].close());
+elements['settings-dialog'].addEventListener('close', render);
+elements.play.addEventListener('click', () => void primaryAction().run());
 window.addEventListener('beforeunload', () => unsubscribe?.(), { once: true });
 
 async function initialize() {
@@ -216,7 +318,7 @@ async function initialize() {
     unsubscribe = bridge.onState(receiveState);
     applySettings(await bridge.settings(), { forceFeed: true });
     if (state.message === 'Loading launcher settings…') {
-      state = { phase: 'idle', message: 'Choose your release source and install folder, then check your client files.', canPlay: false };
+      state = { phase: 'idle', message: 'Checking for updates…', canPlay: false };
     }
   } catch (error) {
     fail(error);
@@ -224,6 +326,7 @@ async function initialize() {
     initialized = true;
     render();
   }
+  if (state.phase !== 'error') await checkNow();
 }
 
 void initialize();

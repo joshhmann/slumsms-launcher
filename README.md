@@ -56,11 +56,42 @@ release-output/
 
 Upload the entire new VERSION directory to static HTTPS hosting, then upload/replace manifest.json last. Keep the directory layout intact. Any ordinary HTTPS static host/CDN/object store can serve it; no running Node/dashboard API is required. Configure manifest.json for revalidation/no-cache and immutable version directories for long caching. The launcher supports redirected feed URLs and resolves payload paths against the final manifest location.
 
-No public hostname, TLS deployment, live download service or official client release has been configured. The old control/repack files have NOT been published as the current client. Enter the eventual HTTPS manifest URL in the launcher, choose the install folder and select Install / update.
+No public hostname, TLS deployment, live download service or official client release has been configured. The old control/repack files have NOT been published as the current client. Put the eventual HTTPS manifest URL in `src/launcher.config.json` (see below) so players never have to enter it.
+
+## Launcher defaults and bundling
+
+`src/launcher.config.json` ships inside the app and sets the defaults:
+
+```json
+{ "feedUrl": "https://example.com/manifest.json", "clientExecutable": "MapleStory.exe" }
+```
+
+Both values are placeholders: replace `feedUrl` with the real manifest URL and `clientExecutable` with the client's executable file name before building. A packaged launcher also reads an optional `launcher.config.json` beside `SlumsMS Launcher.exe`, which overrides the built-in values without a rebuild. The player's own choices in Settings (stored in Electron's per-user `settings.json`) override both; "Reset to default" clears a custom update server.
+
+The game folder is chosen in this order:
+
+1. A folder the player picked in Settings.
+2. Bundled: the folder containing the launcher, or its parent, when it contains `clientExecutable`. Ship the launcher in a `Launcher/` subfolder of the client so its runtime files stay out of the client root.
+3. Standalone: `%LOCALAPPDATA%\SlumsMS`, which never needs elevation.
+
+On start the launcher checks the release automatically, then shows a single button: Install (no client yet), Update (files changed) or Play (verified). Repair, the game folder and the update server live behind the Settings (gear) button.
+
+## Release news
+
+Add `--news FILE.json` when publishing to include release notes in `manifest.json`. The launcher shows them in a Latest updates panel after each check, as plain text only (no HTML or links):
+
+```json
+[
+  { "title": "Henesys festival", "date": "2026-10-18", "body": "Double EXP all weekend.\nSee you there." },
+  { "title": "Patch notes" }
+]
+```
+
+At most 10 entries. `title` (up to 120 characters, one line) is required; `date` (`YYYY-MM-DD`) and `body` (up to 1000 characters, line breaks allowed) are optional. News is part of the release, so changing it means publishing a new version.
 
 ## Manifest contract
 
-`schemaVersion:1`, a nonempty `version`, `launch:{executable,args}`, and `files:[{path,size,sha256,url}]`. The publisher generates these fields; callers should not hand-edit them. File URLs are encoded relative URLs. The launch executable is listed with identical spelling. Paths reject traversal, Windows device names, aliases/case collisions and symlink destinations. Remote transport requires HTTPS; loopback HTTP is permitted only for local development.
+`schemaVersion:1`, a nonempty `version`, `launch:{executable,args}`, `files:[{path,size,sha256,url}]`, and optional `news` (see above). The publisher generates these fields; callers should not hand-edit them. File URLs are encoded relative URLs. The launch executable is listed with identical spelling. Paths reject traversal, Windows device names, aliases/case collisions and symlink destinations. Remote transport requires HTTPS; loopback HTTP is permitted only for local development.
 
 The feed is trusted executable-distribution authority. SHA-256 verifies against the manifest; it does NOT independently authenticate a compromised manifest/host. TLS and release-host access controls are required. Do not add an untrusted release feed.
 
@@ -76,7 +107,8 @@ The feed is trusted executable-distribution authority. SHA-256 verifies against 
 
 ## Verification exercised
 
-- Four passing real-HTTP regression scenarios: fresh nested install/unchanged scan/repair with player-file preservation; corrupt payload preventing partial replacement; immutable publication/symlinks/Windows path aliases; redirected feed resolution. The redirect regression was observed failing before its fix and passing afterward.
+- Five passing real-HTTP regression scenarios: fresh nested install/unchanged scan/repair with player-file preservation; corrupt payload preventing partial replacement; immutable publication/symlinks/Windows path aliases; redirected feed resolution; optional release news round-trip and rejection. The redirect regression was observed failing before its fix and passing afterward.
+- Launcher config unit tests: layered config files, feed URL rules, bundled-client detection beside or above the launcher, and the standalone default folder.
 - Standalone real static publication, download, hash scan and single-file repair smoke.
 - Actual Electron window via a virtual Linux display: Check → update-needed; Install → verified-ready; Play → real throwaway helper process with correct working directory and argument containing a space; invalid feed → displayed404 error → recovery after saving the correct feed.
 - Windows ZIP packaging. This is not a claim that the game or Windows/UAC path was run here.
@@ -96,6 +128,6 @@ The user also supplied [albinosin/Launcher_2016](https://github.com/albinosin/La
 
 Clone this repository on Windows, install Node22 or newer, then run `npm ci` and `npm start`. Run `npm test` for the updater regressions and `npm run build:win` to package the launcher. The repository contains source/tools/tests, not client assets, install folders, private settings or built distributions.
 
-Pending requested changes, **not implemented yet**: a nostalgic launcher layout based on reference photos; a central update/release-notes panel; prominent Play with separate Install/Update and Repair actions; a separate Settings panel with installation path, game-server IP/port and update-feed URL. The current main screen still uses the original utility-style layout.
+Pending requested change, **not implemented yet**: game-server IP/port in the Settings panel.
 
 Game-server address editing is not wired yet. A staged client outside this repository uses `config.ini` with `[config] host` and `port`; verify the actual desktop build's reader before implementing it. Preserve other INI fields and define ownership so updates do not overwrite a saved address or cause permanent checksum mismatches. No production release feed or approved client package has been published.

@@ -78,7 +78,7 @@ async function copyAndHash(source, target, expected) {
 }
 
 /** Publish an explicitly approved staging tree. Existing version directories are never reused. */
-export async function publishRelease({ source, output, version, executable, args = [] } = {}) {
+export async function publishRelease({ source, output, version, executable, args = [], news } = {}) {
   if (typeof source !== 'string' || !source.trim() || typeof output !== 'string' || !output.trim()) {
     throw new Error('Both source and output directories are required.');
   }
@@ -104,7 +104,7 @@ export async function publishRelease({ source, output, version, executable, args
     sha256: '0'.repeat(64),
     url: `${encodeSegment(version)}/${encodePath(file.path)}`,
   }));
-  validateManifest({ schemaVersion: 1, version, launch: { executable, args }, files: publicFiles });
+  validateManifest({ schemaVersion: 1, version, launch: { executable, args }, files: publicFiles, news });
   await directoryWithoutSymlinks(destination, true);
   const versionDirectory = path.join(destination, version);
   const lockDirectory = path.join(destination, '.mapleroot-publish.lock');
@@ -137,7 +137,7 @@ export async function publishRelease({ source, output, version, executable, args
       await directoryWithoutSymlinks(path.dirname(path.join(approvedSource, ...file.path.split('/'))));
       publicFiles[index].sha256 = await copyAndHash(path.join(approvedSource, ...file.path.split('/')), target, file.stat);
     }
-    const manifest = validateManifest({ schemaVersion: 1, version, launch: { executable, args }, files: publicFiles });
+    const manifest = validateManifest({ schemaVersion: 1, version, launch: { executable, args }, files: publicFiles, news });
     await fs.writeFile(manifestTemporary, `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' });
     // Exclusive mkdir reserves the immutable version name. Moving its already complete
     // children is portable to Windows, where rename cannot replace an empty directory.
@@ -162,12 +162,12 @@ export async function publishRelease({ source, output, version, executable, args
   }
 }
 
-const usage = 'Usage: node tools/publish.mjs --source DIR --out DIR --version VERSION --exe RELATIVE_PATH [--arg VALUE ...]';
+const usage = 'Usage: node tools/publish.mjs --source DIR --out DIR --version VERSION --exe RELATIVE_PATH [--arg VALUE ...] [--news FILE.json]';
 
 async function cli(argv) {
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) { console.log(usage); return; }
   const options = { args: [] };
-  const names = new Map([['--source', 'source'], ['--out', 'output'], ['--version', 'version'], ['--exe', 'executable']]);
+  const names = new Map([['--source', 'source'], ['--out', 'output'], ['--version', 'version'], ['--exe', 'executable'], ['--news', 'news']]);
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     const key = names.get(flag);
@@ -182,6 +182,11 @@ async function cli(argv) {
   }
   for (const key of ['source', 'output', 'version', 'executable']) {
     if (!Object.hasOwn(options, key)) throw new Error(`Missing required option: ${key}\n${usage}`);
+  }
+  if (Object.hasOwn(options, 'news')) {
+    try { options.news = JSON.parse(await fs.readFile(options.news, 'utf8')); } catch (error) {
+      throw new Error(`Cannot read news file ${options.news}: ${error.message}`);
+    }
   }
   const manifest = await publishRelease(options);
   console.log(`Published ${manifest.version}: ${manifest.files.length} files to ${path.resolve(options.output)}`);
