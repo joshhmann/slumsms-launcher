@@ -99,3 +99,19 @@ test('redirected feeds resolve file URLs relative to the final manifest location
   await installRelease(f.install, await loadRelease(f.url));
   assert.equal(await readFile(path.join(f.install, 'Data/Map/Map 1.img'), 'utf8'), 'approved IMG bytes');
 });
+
+test('optional release news round-trips through publish and load; bad news is rejected', async t => {
+  const f = await fixture(t);
+  await f.publish('1.0.0');
+  assert.equal(Object.hasOwn(await loadRelease(f.url), 'news'), false);
+  const news = [{ title: 'Henesys festival', date: '2026-10-18', body: 'Double EXP all weekend.\nSee you there.' }, { title: 'Patch notes' }];
+  await publishRelease({ source: f.source, output: f.output, version: '1.0.1', executable: 'Client.exe', news });
+  const release = await loadRelease(f.url);
+  assert.deepEqual(release.news, news);
+  assert.ok(Object.isFrozen(release.news[0]));
+  const manifest = JSON.parse(await readFile(path.join(f.output, 'manifest.json'), 'utf8'));
+  for (const bad of [{}, [{ title: '' }], [{ title: 'x', date: '18/10/2026' }], [{ title: 'a\nb' }], [{ title: 'x', body: 'y'.repeat(1001) }], Array(11).fill({ title: 'x' })]) {
+    assert.throws(() => validateManifest({ ...manifest, news: bad }));
+  }
+  await assert.rejects(publishRelease({ source: f.source, output: f.output, version: '1.0.2', executable: 'Client.exe', news: [{ title: '' }] }));
+});

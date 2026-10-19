@@ -34,6 +34,30 @@ function relativeURL(value, label) {
   return value;
 }
 
+function newsText(value, label, max, multiline) {
+  const unsafe = multiline ? /[\x00-\x09\x0b-\x1f\x7f]/u : /[\x00-\x1f\x7f]/u;
+  if (typeof value !== 'string' || !value.trim() || value.length > max || unsafe.test(value)) {
+    throw new Error(`${label} must be nonempty plain text of at most ${max} characters.`);
+  }
+  return value;
+}
+
+/** Optional release notes shown by the launcher as plain text. */
+function validateNews(value) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 10) throw new Error('Manifest news must be an array of at most 10 entries.');
+  return Object.freeze(value.map((entry, index) => {
+    if (!entry || typeof entry !== 'object') throw new Error(`Invalid manifest news entry ${index + 1}.`);
+    const item = { title: newsText(entry.title, `News ${index + 1} title`, 120, false) };
+    if (entry.date !== undefined) {
+      if (typeof entry.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(entry.date)) throw new Error(`News ${index + 1} date must be YYYY-MM-DD.`);
+      item.date = entry.date;
+    }
+    if (entry.body !== undefined) item.body = newsText(entry.body, `News ${index + 1} body`, 1000, true);
+    return Object.freeze(item);
+  }));
+}
+
 /** Validate and copy the public manifest; the result is deeply frozen. */
 export function validateManifest(value) {
   if (!value || typeof value !== 'object' || value.schemaVersion !== 1) {
@@ -74,11 +98,13 @@ export function validateManifest(value) {
     return Object.freeze({ path: name, size: file.size, sha256: file.sha256.toLowerCase(), url: relativeURL(file.url, `URL for ${name}`) });
   });
   if (!files.some((file) => file.path === executable)) throw new Error('Launch executable must be listed with identical spelling in manifest files.');
+  const news = validateNews(value.news);
   const manifest = Object.freeze({
     schemaVersion: 1,
     version: value.version,
     launch: Object.freeze({ executable, args: Object.freeze([...value.launch.args]) }),
     files: Object.freeze(files),
+    ...(news ? { news } : {}),
   });
   validated.add(manifest);
   return manifest;

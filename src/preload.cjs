@@ -3,7 +3,9 @@ const invoke = name => (...args) => ipcRenderer.invoke(`launcher:${name}`, ...ar
 contextBridge.exposeInMainWorld('launcher', {
   settings: invoke('settings'),
   saveFeed: invoke('saveFeed'),
+  resetFeed: invoke('resetFeed'),
   chooseFolder: invoke('chooseFolder'),
+  openFolder: invoke('openFolder'),
   check: invoke('check'),
   update: invoke('update'),
   play: invoke('play'),
