@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+    <meta name="color-scheme" content="dark">
+    <title>SlumsMS Launcher</title>
+    <link rel="stylesheet" href="./style.css">
+    <script type="module" src="./renderer.mjs"></script>
+  </head>
+  <body>
+    <div class="launcher">
+      <header class="masthead">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><span></span></span>
+          <div><p class="brand-name">SlumsMS</p><p class="brand-caption">GAME LAUNCHER</p></div>
+        </div>
+        <span class="phase-badge" id="phase-badge" data-phase="idle"><span class="status-dot" aria-hidden="true"></span><span id="phase-label">Starting</span></span>
+      </header>
+
+      <main>
+        <section class="client-card" aria-labelledby="status-heading">
+          <div class="client-copy">
+            <p class="eyebrow">YOUR NEXT ADVENTURE</p>
+            <h1 id="status-heading">Make yourself at home.</h1>
+            <p class="status-message" id="status-message" role="status" aria-live="polite" aria-atomic="true">Loading launcher settings…</p>
+          </div>
+          <div class="release-detail"><span class="detail-label">RELEASE</span><span id="release-version">Not checked</span></div>
+          <div class="progress-area" id="progress-area" hidden>
+            <div class="progress-caption"><span id="progress-label">Working…</span><span id="progress-detail"></span></div>
+            <progress id="operation-progress" max="1" aria-labelledby="progress-label"></progress>
+          </div>
+        </section>
+
+        <section class="settings-card" aria-labelledby="settings-heading">
+          <div class="section-heading"><h2 id="settings-heading">Your installation</h2><span class="section-note">Stored on this device</span></div>
+          <form id="feed-form">
+            <label for="feed-url">Release manifest</label>
+            <p class="field-help" id="feed-help">Use the HTTPS manifest URL provided by your server.</p>
+            <div class="input-row">
+              <input id="feed-url" name="feed-url" type="url" inputmode="url" placeholder="Enter an HTTPS manifest URL" aria-describedby="feed-help feed-notice" autocomplete="off" autocapitalize="off" spellcheck="false" required disabled>
+              <button class="button button-secondary" id="save-feed" type="submit" disabled>Save source</button>
+            </div>
+            <p class="field-notice" id="feed-notice" aria-live="polite"></p>
+          </form>
+          <div class="folder-section">
+            <div class="folder-copy"><h3 id="folder-label">Install folder</h3><p class="folder-path" id="install-dir" aria-labelledby="folder-label">No folder selected</p></div>
+            <button class="button button-secondary" id="choose-folder" type="button" aria-describedby="install-dir" disabled>Choose folder</button>
+          </div>
+        </section>
+
+        <section class="action-bar" aria-label="Client actions">
+          <div class="maintenance-actions">
+            <button class="button button-quiet" id="check-files" type="button" disabled>Check files / repair</button>
+            <button class="button button-secondary" id="install-update" type="button" disabled>Install / update</button>
+          </div>
+          <button class="button button-play" id="play" type="button" disabled><span id="play-label">Play</span><span class="play-arrow" aria-hidden="true">↗</span></button>
+        </section>
+        <p class="action-help" id="action-help">Save a release source and choose an install folder to get started.</p>
+        <p class="error-message" id="error-message" role="alert" hidden></p>
+      </main>
+
+      <footer><span class="footer-mark" aria-hidden="true"></span><span>Checks verify your files. Updates download only what needs to change.</span></footer>
+    </div>
+  </body>
+</html>

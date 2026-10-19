@@ -1,0 +1,27 @@
+{
+  "name": "mapleroot-launcher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SlumsMS Windows launcher and static client release publisher",
+  "type": "module",
+  "main": "src/main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "publish:client": "node tools/publish.mjs",
+    "build:win": "electron-builder --win zip --x64 --publish never",
+    "test": "node --test"
+  },
+  "engines": { "node": ">=22" },
+  "devDependencies": {
+    "electron": "44.9.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.mapleroot.launcher",
+    "productName": "SlumsMS Launcher",
+    "directories": { "output": "dist" },
+    "files": ["src/**/*", "package.json"],
+    "win": { "target": "zip", "signAndEditExecutable": false },
+    "artifactName": "SlumsMS-Launcher-${version}-win-${arch}.${ext}"
+  }
+}
