@@ -49,8 +49,10 @@ async function collectFiles(directory, prefix = '', files = []) {
   return files;
 }
 
+// Windows path-based lstat reports dev 0 while handle stat reports the volume serial; compare dev only when both are known.
 function unchanged(before, after) {
-  return before.dev === after.dev && before.ino === after.ino && before.size === after.size
+  const sameDevice = before.dev === after.dev || before.dev === 0 || after.dev === 0;
+  return sameDevice && before.ino === after.ino && before.size === after.size
     && before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs;
 }
 
