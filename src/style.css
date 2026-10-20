@@ -53,7 +53,7 @@ button:disabled { cursor: not-allowed; }
 .phase-badge[data-phase="error"] { color: #ffcfc2; }
 .phase-badge[data-phase="error"] .status-dot { background: #ef6a58; }
 .phase-badge[data-phase="needs-update"] .status-dot { background: var(--orange-light); }
-.phase-badge[data-phase="checking"] .status-dot, .phase-badge[data-phase="updating"] .status-dot { background: #6ab8ea; }
+.phase-badge[data-phase="checking"] .status-dot, .phase-badge[data-phase="updating"] .status-dot, .phase-badge[data-phase="self-updating"] .status-dot { background: #6ab8ea; }
 .masthead-actions { display: flex; align-items: center; gap: 8px; }
 .icon-button { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; border: 1px solid #ffffff2a; border-radius: 4px; color: var(--gold-light); background: #0c1222b8; font-size: 18px; line-height: 1; transition: filter 100ms; }
 .icon-button:hover { filter: brightness(1.3); }

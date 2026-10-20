@@ -301,8 +301,8 @@ async function request(input, signal, access = null) {
   throw permanent(new Error('Release request exceeded the redirect limit.'));
 }
 
-async function readJSON(input, label, access) {
-  const { response, url } = await request(input, undefined, access);
+async function readJSON(input, label, access, signal) {
+  const { response, url } = await request(input, signal, access);
   const declared = Number(response.headers.get('content-length'));
   if (declared > MAX_MANIFEST_BYTES) throw new Error(`${label} is too large.`);
   const bytes = Buffer.from(await response.arrayBuffer());
@@ -533,6 +533,67 @@ export async function loadRelease(feedUrl, { installDir, accessKey = '' } = {}) 
   return release;
 }
 
+/** The launcher's own update channel. It sits beside the game manifest and is never a game release layer. */
+export const LAUNCHER_CHANNEL_FILE = 'launcher.json';
+export const LAUNCHER_PLATFORMS = Object.freeze(['win32-x64', 'win32-arm64', 'linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64']);
+
+/** Launcher versions are plain MAJOR.MINOR.PATCH, as in package.json. */
+export function launcherVersion(value, label = 'Launcher version') {
+  if (typeof value !== 'string' || !/^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/u.test(value)) {
+    throw new Error(`${label} must be MAJOR.MINOR.PATCH.`);
+  }
+  return value;
+}
+
+export const launcherLayerName = (platform) => `launcher-${platform}`;
+
+/**
+ * Validate launcher.json: { schemaVersion: 1, version, platform, executable, manifestUrl, sha256 }.
+ * manifestUrl names a per-file manifest in the layer format; sha256 pins its exact bytes.
+ */
+export function validateLauncherChannel(value) {
+  if (!value || typeof value !== 'object' || value.schemaVersion !== 1) throw new Error('Unsupported launcher channel: schemaVersion must be 1.');
+  if (!LAUNCHER_PLATFORMS.includes(value.platform)) throw new Error('Launcher channel platform is not supported.');
+  return Object.freeze({
+    schemaVersion: 1,
+    version: launcherVersion(value.version),
+    platform: value.platform,
+    executable: managedPath(value.executable, 'Launcher executable'),
+    manifestUrl: relativeURL(value.manifestUrl, 'Launcher manifestUrl'),
+    sha256: hexDigest(value.sha256, 'launcher manifest'),
+  });
+}
+
+/**
+ * Load the launcher channel beside `feedUrl`, with the same access key and verification as game layers.
+ * Returns null when the server publishes no launcher.json (404). The result's `release` is a loaded
+ * release, so inspectRelease/installRelease stage it exactly like a game install.
+ */
+export async function loadLauncherChannel(feedUrl, { accessKey = '', signal } = {}) {
+  const access = feedAccess(feedUrl, accessKey);
+  let top;
+  try { top = await readJSON(new URL(LAUNCHER_CHANNEL_FILE, networkURL(feedUrl)).href, 'launcher channel', access, signal); } catch (error) {
+    if (error.status === 404) return null;
+    throw error;
+  }
+  const channel = validateLauncherChannel(parseJSON(top.bytes, 'launcher channel'));
+  const requestUrl = new URL(channel.manifestUrl, top.finalUrl).href;
+  const source = await readJSON(requestUrl, 'launcher manifest', access, signal);
+  if (sha256(source.bytes) !== channel.sha256) throw new Error(`Launcher manifest ${channel.version} failed SHA-256 verification.`);
+  const layer = validateLayerManifest(parseJSON(source.bytes, 'launcher manifest'), { name: launcherLayerName(channel.platform), version: channel.version });
+  if (!layer.files.some((file) => file.path === channel.executable)) throw new Error('Launcher executable must be listed with identical spelling in the launcher manifest.');
+  const release = Object.freeze({
+    schemaVersion: 2,
+    version: channel.version,
+    launch: Object.freeze({ executable: channel.executable, args: Object.freeze([]) }),
+    playerOwned: Object.freeze([]),
+    layers: Object.freeze([]),
+    files: Object.freeze(layer.files.map((file) => Object.freeze({ ...file, url: new URL(file.url, source.finalUrl).href, layer: layer.layer }))),
+  });
+  loaded.set(release, { layerSources: [], access });
+  return { ...channel, release };
+}
+
 /** Accept loaded releases, or a raw schemaVersion 1 manifest for inspection only. */
 function knownRelease(release) {
   if (loaded.has(release)) return release;
@@ -646,7 +707,8 @@ async function download(file, target, onBytes, signal, access) {
  * that replace existing ones are committed only after every download has verified.
  */
 export async function installRelease(root, release, onProgress = () => {}, options = {}) {
-  const { mode = 'fast', concurrency = DEFAULT_CONCURRENCY, retries = 4, retryDelayMs = 500 } = options;
+  const { mode = 'fast', concurrency = DEFAULT_CONCURRENCY, retries = 4 } = options;
+  const retryDelayMs = options.retryDelayMs ?? 500;
   if (!loaded.has(release)) throw new Error('Load the release from its manifest URL before downloading files.');
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > MAX_CONCURRENCY) throw new Error(`Concurrency must be 1-${MAX_CONCURRENCY}.`);
   const { access } = loaded.get(release);
@@ -678,6 +740,9 @@ export async function installRelease(root, release, onProgress = () => {}, optio
     verified.set(file.path, { size: stat.size, mtimeMs: stat.mtimeMs, sha256: file.sha256 });
   }
   const controller = new AbortController();
+  // An optional caller signal (the launcher self-update's stall watchdog) cancels the whole install.
+  if (options.signal?.aborted) controller.abort(options.signal.reason);
+  options.signal?.addEventListener('abort', () => controller.abort(options.signal.reason), { once: true });
   async function transfer(file) {
     let temporary;
     for (let attempt = 0; ; attempt += 1) {
@@ -717,6 +782,7 @@ export async function installRelease(root, release, onProgress = () => {}, optio
       }
     });
     if (failure) throw failure;
+    if (controller.signal.aborted) throw controller.signal.reason ?? new Error('Install cancelled.');
     // No existing file is replaced until every download has passed verification.
     for (const { file, temporary } of deferred) {
       await commit(file, temporary);

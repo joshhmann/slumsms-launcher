@@ -14,6 +14,7 @@ const phaseNames = {
   ready: 'Ready to play',
   'needs-update': 'Update needed',
   updating: 'Updating files',
+  'self-updating': 'Updating launcher',
   launching: 'Launching',
   error: 'Needs attention',
 };
@@ -23,10 +24,11 @@ const phaseHeadings = {
   ready: 'Ready when you are.',
   'needs-update': 'Your client needs an update.',
   updating: 'Getting everything ready.',
+  'self-updating': 'Updating the launcher.',
   launching: 'Opening your adventure.',
   error: 'Let’s get you back on track.',
 };
-const busyPhases = new Set(['checking', 'updating', 'launching']);
+const busyPhases = new Set(['checking', 'updating', 'self-updating', 'launching']);
 const bridgeMethods = ['settings', 'saveFeed', 'resetFeed', 'saveAccessKey', 'clearAccessKey', 'chooseFolder', 'openFolder', 'check', 'update', 'repair', 'play', 'onState'];
 const bridge = window.launcher;
 const bridgeAvailable = bridgeMethods.every((method) => typeof bridge?.[method] === 'function');
@@ -78,7 +80,7 @@ function isCount(value) {
 }
 
 function renderProgress() {
-  const visible = state.phase === 'checking' || state.phase === 'updating';
+  const visible = state.phase === 'checking' || state.phase === 'updating' || state.phase === 'self-updating';
   elements['progress-area'].hidden = !visible;
   elements['action-help'].hidden = visible;
   if (!visible) {
@@ -86,7 +88,8 @@ function renderProgress() {
     elements['progress-detail'].textContent = '';
     return;
   }
-  elements['progress-label'].textContent = state.phase === 'checking' ? 'Verifying game files' : state.fresh ? 'Installing SlumsMS' : 'Downloading update';
+  elements['progress-label'].textContent = state.phase === 'self-updating' ? 'Updating launcher…'
+    : state.phase === 'checking' ? 'Verifying game files' : state.fresh ? 'Installing SlumsMS' : 'Downloading update';
   const details = [];
   if (isCount(state.filesDone) && isCount(state.filesTotal)) {
     details.push(`${state.filesDone.toLocaleString()} / ${state.filesTotal.toLocaleString()} files`);
@@ -151,6 +154,7 @@ function primaryAction() {
 
 function busyLabel() {
   if (operation === 'play' || state.phase === 'launching') return 'Launching…';
+  if (state.phase === 'self-updating') return 'Updating launcher…';
   if (state.phase === 'updating' || operation === 'update') return state.fresh ? 'Installing…' : 'Updating…';
   if (state.phase === 'checking' || operation === 'check') return 'Checking…';
   return 'Working…';
@@ -230,6 +234,7 @@ function render() {
   let help;
   if (!bridgeAvailable) help = 'Open SlumsMS in the desktop launcher to manage your client.';
   else if (!initialized) help = 'Starting…';
+  else if (phase === 'self-updating') help = 'The launcher restarts by itself when the update is ready.';
   else if (busy) help = 'Keep the launcher open while this finishes.';
   else if (!configuration.feedUrl) help = 'Set the update server in Settings to get started.';
   else if (phase === 'ready' && state.canPlay) help = 'All game files verified.';

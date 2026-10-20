@@ -1,9 +1,10 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
-import { readFile, writeFile, mkdir, rename, stat } from 'node:fs/promises';
+import { readFile, writeFile, appendFile, mkdir, rename, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
-import { loadRelease, inspectRelease, installRelease } from './updater.mjs';
+import { loadRelease, inspectRelease, installRelease, loadLauncherChannel } from './updater.mjs';
+import { launcherUpdateDecision, prepareLauncherUpdate, startLauncherSwap, cleanupLauncherUpdates, healthyMarker } from './self-update.mjs';
 import { readLauncherConfig, detectBundledClient, standaloneInstallDir, validateFeedUrl, validAccessKey, effectiveAccessKey } from './launcher-config.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -17,6 +18,18 @@ let bundledDir = '';
 let busy = false;
 let state = { phase: 'idle', message: 'Checking for updates…', canPlay: false };
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
+const logFile = () => path.join(app.getPath('userData'), 'launcher.log');
+const argument = flag => process.argv.find(value => value.startsWith(flag))?.slice(flag.length);
+
+/** Append to launcher.log in the per-user app data folder (rotated at 1 MiB). Never log the access key. */
+async function log(message) {
+  console.log(message);
+  try {
+    await mkdir(path.dirname(logFile()), { recursive: true });
+    if ((await stat(logFile()).catch(() => null))?.size > 1024 * 1024) await rename(logFile(), `${logFile()}.old`);
+    await appendFile(logFile(), `${new Date().toISOString()} ${message}\n`);
+  } catch { /* logging never stops the launcher */ }
+}
 
 function accessKey() {
   return effectiveAccessKey({ savedKey: settings.accessKey, defaultKey: config.accessKey, feedUrl: settings.feedUrl || config.feedUrl, defaultFeedUrl: config.feedUrl });
@@ -106,6 +119,52 @@ async function launch(release) {
     await runProcess(executable, release.launch.args, { cwd: installDir, detached: true });
   }
 }
+
+// Self-update runs once, before the first game check. Any failure is logged and the current launcher
+// carries on; the swap only starts once a complete, verified build is staged beside it.
+const launcherFolder = () => path.dirname(app.getPath('exe'));
+let selfUpdateChecked = false;
+async function selfUpdate() {
+  if (selfUpdateChecked) return false;
+  selfUpdateChecked = true;
+  const current = app.getVersion();
+  const updated = argument('--self-updated=');
+  if (!app.isPackaged) return false;
+  for (const note of await cleanupLauncherUpdates(launcherFolder(), current)) await log(`Self-update: ${note}`);
+  if (process.argv.includes('--no-self-update') || process.env.SLUMSMS_NO_SELF_UPDATE === '1') return false;
+  // A build that still reports its old version after updating would update forever; stop the loop.
+  if (updated && updated !== current) { await log(`Self-update: started as ${updated} but this build reports ${current}; skipping launcher updates this session.`); return false; }
+  const { feedUrl } = effective();
+  if (!feedUrl) return false;
+  const stalled = new AbortController();
+  let watchdog;
+  try {
+    const channel = await loadLauncherChannel(feedUrl, { accessKey: accessKey(), signal: AbortSignal.timeout(15_000) });
+    const decision = launcherUpdateDecision({ channel, currentVersion: current, platform: `${process.platform}-${process.arch}`, skipVersion: argument('--self-update-failed=') });
+    if (decision !== 'update') { await log(`Self-update: ${decision}.`); return false; }
+    await log(`Self-update: staging launcher ${channel.version} (running ${current}).`);
+    send({ phase: 'self-updating', message: `Updating launcher to ${channel.version}…`, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0 });
+    // No progress for a minute means a stalled download; give up and keep this launcher.
+    let last = Date.now();
+    watchdog = setInterval(() => { if (Date.now() - last > 60_000) stalled.abort(new Error('The launcher download stalled.')); }, 5_000);
+    const { stage, changed } = await prepareLauncherUpdate({ launcherDir: launcherFolder(), channel, concurrency: config.downloadConcurrency, signal: stalled.signal,
+      onProgress: value => { last = Date.now(); progress({ ...value, message: `Updating launcher to ${channel.version}…` }); } });
+    if (!changed.length) { await log(`Self-update: ${channel.version} has no changed files; nothing to swap.`); return false; }
+    send({ message: 'Restarting the launcher…', filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0 });
+    const relaunchArgs = process.argv.slice(1).filter(value => value.startsWith('--feed-url=') || value.startsWith('--install-dir=') || value === '--no-sandbox');
+    await startLauncherSwap({ launcherDir: launcherFolder(), stage, channel, changed, currentVersion: current, relaunchArgs, logFile: logFile() });
+    await log(`Self-update: ${changed.length} files staged for ${channel.version}; restarting.`);
+    app.exit(0);
+    return true;
+  } catch (error) {
+    await log(`Self-update failed; keeping launcher ${current}: ${error.message}`);
+    // A missing key is fixed in Settings, whose save re-checks; try the launcher update again then.
+    if (error.code === 'ACCESS_KEY_REQUIRED') selfUpdateChecked = false;
+    send({ phase: 'checking', message: 'Checking for updates…', filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0 });
+    return false;
+  } finally { clearInterval(watchdog); }
+}
+
 function handle(name, action) {
   ipcMain.handle(`launcher:${name}`, async (event, ...args) => {
     if (event.sender !== window.webContents || event.senderFrame?.url !== page) throw new Error('Untrusted launcher request.');
@@ -182,7 +241,7 @@ else {
       const failure = await shell.openPath(installDir);
       if (failure) throw new Error(failure);
     });
-    handle('check', () => operation('checking', checkRelease).then(() => undefined));
+    handle('check', () => operation('checking', async () => { if (!(await selfUpdate())) await checkRelease(); }).then(() => undefined));
     const install = mode => operation('updating', async () => {
       const { feedUrl, installDir } = requireSettings();
       const release = await loadRelease(feedUrl, { installDir, accessKey: accessKey() });
@@ -200,6 +259,14 @@ else {
       send({ phase: 'ready', message: 'Client process started.', canPlay: true });
     }));
     await window.loadFile(path.join(here, 'index.html'));
+    if (app.isPackaged) {
+      // Tell the swap helper this build starts, so it keeps the update instead of rolling back.
+      const updated = argument('--self-updated=');
+      if (updated === app.getVersion()) {
+        await writeFile(healthyMarker(launcherFolder(), updated), String(process.pid)).catch(error => log(`Self-update: could not confirm start: ${error.message}`));
+        await log(`Self-update: now running launcher ${updated}.`);
+      }
+    }
   }).catch(error => { dialog.showErrorBox('SlumsMS Launcher', error.message); app.quit(); });
   app.on('window-all-closed', () => app.quit());
 }

@@ -5,7 +5,8 @@ import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
-import { validateManifest, validateLayerManifest, mergeLayers, layerName, safeComponent } from '../src/updater.mjs';
+import { validateManifest, validateLayerManifest, validateLauncherChannel, mergeLayers, layerName, safeComponent, launcherLayerName, LAUNCHER_CHANNEL_FILE, LAUNCHER_PLATFORMS } from '../src/updater.mjs';
+import { compareVersions } from '../src/self-update.mjs';
 
 const encodeSegment = (segment) => encodeURIComponent(segment).replace(/[!'()*]/gu, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 export const DEFAULT_EXECUTABLE = 'SlumsMS.exe';
@@ -212,39 +213,44 @@ export async function publishLayer({ source, output, layer, version } = {}) {
   safeComponent(version, 'Layer version');
   const { approvedSource, destination } = await approvedDirectories(source, output);
   const sourceFiles = await collectFiles(approvedSource);
+  return withLock(destination, async () => {
+    const manifest = await writeLayer({ approvedSource, sourceFiles, layerDirectory: path.join(destination, 'layers', layer), layer, version });
+    return { ...manifest, manifestUrl: layerManifestUrl(layer, version) };
+  });
+}
+
+/** Copy and hash a source tree into LAYER_DIRECTORY/VERSION/{files/..., manifest.json}; call under the output lock. */
+async function writeLayer({ approvedSource, sourceFiles, layerDirectory, layer, version }) {
   const files = sourceFiles.map((file) => ({ path: file.path, size: file.size, sha256: '0'.repeat(64), url: `files/${encodePath(file.path)}` }));
   validateLayerManifest({ schemaVersion: 2, layer, version, files });
-  return withLock(destination, async () => {
-    const layerDirectory = path.join(destination, 'layers', layer);
-    await directoryWithoutSymlinks(layerDirectory, true);
-    await assertNoAlias(layerDirectory, version, `Layer ${layer} version`);
-    const versionDirectory = path.join(layerDirectory, version);
-    const temporary = await fs.mkdtemp(path.join(layerDirectory, '.mapleroot-publish-'));
-    let reserved = false;
-    let published = false;
-    try {
-      await fs.mkdir(path.join(temporary, 'files'));
-      for (let index = 0; index < sourceFiles.length; index += 1) {
-        const file = sourceFiles[index];
-        const target = path.join(temporary, 'files', ...file.path.split('/'));
-        await fs.mkdir(path.dirname(target), { recursive: true });
-        await directoryWithoutSymlinks(path.dirname(path.join(approvedSource, ...file.path.split('/'))));
-        files[index].sha256 = await copyAndHash(path.join(approvedSource, ...file.path.split('/')), target, file.stat);
-      }
-      const manifest = validateLayerManifest({ schemaVersion: 2, layer, version, files });
-      const body = `${JSON.stringify(manifest, null, 2)}\n`;
-      await fs.writeFile(path.join(temporary, 'manifest.json'), body, { flag: 'wx' });
-      await fs.mkdir(versionDirectory);
-      reserved = true;
-      await fs.rename(path.join(temporary, 'files'), path.join(versionDirectory, 'files'));
-      await fs.rename(path.join(temporary, 'manifest.json'), path.join(versionDirectory, 'manifest.json'));
-      published = true;
-      return { manifest, sha256: digestBytes(body), manifestUrl: layerManifestUrl(layer, version) };
-    } finally {
-      await fs.rm(temporary, { recursive: true, force: true });
-      if (reserved && !published) await fs.rm(versionDirectory, { recursive: true, force: true });
+  await directoryWithoutSymlinks(layerDirectory, true);
+  await assertNoAlias(layerDirectory, version, `Layer ${layer} version`);
+  const versionDirectory = path.join(layerDirectory, version);
+  const temporary = await fs.mkdtemp(path.join(layerDirectory, '.mapleroot-publish-'));
+  let reserved = false;
+  let published = false;
+  try {
+    await fs.mkdir(path.join(temporary, 'files'));
+    for (let index = 0; index < sourceFiles.length; index += 1) {
+      const file = sourceFiles[index];
+      const target = path.join(temporary, 'files', ...file.path.split('/'));
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await directoryWithoutSymlinks(path.dirname(path.join(approvedSource, ...file.path.split('/'))));
+      files[index].sha256 = await copyAndHash(path.join(approvedSource, ...file.path.split('/')), target, file.stat);
     }
-  });
+    const manifest = validateLayerManifest({ schemaVersion: 2, layer, version, files });
+    const body = `${JSON.stringify(manifest, null, 2)}\n`;
+    await fs.writeFile(path.join(temporary, 'manifest.json'), body, { flag: 'wx' });
+    await fs.mkdir(versionDirectory);
+    reserved = true;
+    await fs.rename(path.join(temporary, 'files'), path.join(versionDirectory, 'files'));
+    await fs.rename(path.join(temporary, 'manifest.json'), path.join(versionDirectory, 'manifest.json'));
+    published = true;
+    return { manifest, sha256: digestBytes(body) };
+  } finally {
+    await fs.rm(temporary, { recursive: true, force: true });
+    if (reserved && !published) await fs.rm(versionDirectory, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -294,12 +300,83 @@ export async function publishLayeredRelease({ output, version, executable = DEFA
   });
 }
 
+/** Read one file from an Electron app.asar (a JSON header, then the packed file bytes). */
+export async function readAsarFile(asar, relative) {
+  const handle = await fs.open(asar, 'r');
+  try {
+    const prefix = Buffer.alloc(16);
+    await handle.read(prefix, 0, 16, 0);
+    const headerSize = prefix.readUInt32LE(4);
+    const jsonSize = prefix.readUInt32LE(12);
+    if (prefix.readUInt32LE(0) !== 4 || jsonSize > headerSize || headerSize > 64 * 1024 * 1024) throw new Error(`Not an asar archive: ${asar}`);
+    const json = Buffer.alloc(jsonSize);
+    await handle.read(json, 0, jsonSize, 16);
+    let node = JSON.parse(json.toString('utf8'));
+    for (const part of relative.split('/')) node = node?.files?.[part];
+    if (!node || node.unpacked || typeof node.offset !== 'string' || !Number.isSafeInteger(node.size)) throw new Error(`${relative} is not packed in ${asar}`);
+    const bytes = Buffer.alloc(node.size);
+    await handle.read(bytes, 0, node.size, 8 + headerSize + Number(node.offset));
+    return bytes;
+  } finally { await handle.close(); }
+}
+
+export const DEFAULT_LAUNCHER_EXECUTABLE = 'SlumsMS Launcher.exe';
+const launcherManifestUrl = (platform, version) => `launcher/${encodeSegment(platform)}/${encodeSegment(version)}/manifest.json`;
+
+/**
+ * Publish an unpacked launcher build (electron-builder's dist/win-unpacked) to the launcher channel:
+ * OUTPUT/launcher/PLATFORM/VERSION/{files/..., manifest.json} in the layer format, then
+ * OUTPUT/launcher.json last. The version comes from the build's own package.json, so a build can
+ * never be published under a version it does not report. Game releases and manifest.json are untouched.
+ */
+export async function publishLauncher({ source, output, platform = 'win32-x64', executable = DEFAULT_LAUNCHER_EXECUTABLE, version, allowNoAccessKey = false } = {}) {
+  if (!LAUNCHER_PLATFORMS.includes(platform)) throw new Error(`Launcher platform must be one of ${LAUNCHER_PLATFORMS.join(', ')}.`);
+  const { approvedSource, destination } = await approvedDirectories(source, output);
+  const asar = path.join(approvedSource, 'resources', 'app.asar');
+  let built;
+  let shipped;
+  try {
+    built = JSON.parse((await readAsarFile(asar, 'package.json')).toString('utf8')).version;
+    shipped = JSON.parse((await readAsarFile(asar, 'src/launcher.config.json')).toString('utf8'));
+  } catch (error) { throw new Error(`Source is not an unpacked launcher build (resources/app.asar): ${error.message}`); }
+  if (version !== undefined && version !== built) throw new Error(`--version ${version} does not match the build's own version ${built}.`);
+  // Friends rely on the built-in key; publishing a build without one would lock them out of every later update.
+  if (!shipped?.accessKey && !allowNoAccessKey) throw new Error('This build has no built-in access key. Rebuild with the key, or pass --allow-no-access-key if the patch server needs none.');
+  const sourceFiles = await collectFiles(approvedSource);
+  if (!sourceFiles.some((file) => file.path === executable)) throw new Error(`Launcher executable ${executable} is not in ${approvedSource}.`);
+  // A launcher.config.json beside the exe belongs to the player; an update must never replace it.
+  if (sourceFiles.some((file) => file.path.toLowerCase() === 'launcher.config.json')) throw new Error('Remove launcher.config.json from the build folder; it is the player\'s override file.');
+  const layer = launcherLayerName(platform);
+  return withLock(destination, async () => {
+    const channelPath = path.join(destination, LAUNCHER_CHANNEL_FILE);
+    const current = await statOrMissing(channelPath);
+    if (current && (!current.isFile() || current.isSymbolicLink())) throw new Error(`Output ${LAUNCHER_CHANNEL_FILE} must be a regular file, not a symlink.`);
+    if (current) {
+      let previous;
+      try { previous = validateLauncherChannel(JSON.parse(await fs.readFile(channelPath, 'utf8'))); } catch { previous = null; }
+      if (previous && previous.platform === platform && compareVersions(built, previous.version) <= 0) {
+        throw new Error(`Launcher ${previous.version} is already published; ${built} is not newer (launchers never downgrade).`);
+      }
+    }
+    const { manifest, sha256 } = await writeLayer({ approvedSource, sourceFiles, layerDirectory: path.join(destination, 'launcher', platform), layer, version: built });
+    const channel = validateLauncherChannel({ schemaVersion: 1, version: built, platform, executable, manifestUrl: launcherManifestUrl(platform, built), sha256 });
+    const temporary = path.join(destination, `.mapleroot-launcher-${randomUUID()}.tmp`);
+    try {
+      await fs.writeFile(temporary, `${JSON.stringify(channel, null, 2)}\n`, { flag: 'wx' });
+      await fs.rename(temporary, channelPath);
+    } finally { await fs.rm(temporary, { force: true }); }
+    return { channel, files: manifest.files.length, bytes: manifest.files.reduce((sum, file) => sum + file.size, 0) };
+  });
+}
+
 const usage = `Usage:
   Publish a layer (immutable OUT/layers/NAME/VERSION/):
     node tools/publish.mjs --layer NAME --source DIR --out DIR --version VERSION
   Point the release at published layers (writes OUT/manifest.json last; later layers override earlier):
     node tools/publish.mjs --release VERSION --out DIR --use base@BASE_VERSION --use client@CLIENT_VERSION
       [--exe SlumsMS.exe] [--arg VALUE ...] [--news FILE.json] [--player-owned PATH ...] [--no-player-owned]
+  Publish a launcher build to the launcher channel (OUT/launcher/PLATFORM/VERSION/, then OUT/launcher.json):
+    node tools/publish.mjs --launcher dist/win-unpacked --out DIR [--platform win32-x64] [--version X.Y.Z] [--allow-no-access-key]
   Legacy single-folder release (schemaVersion 1):
     node tools/publish.mjs --source DIR --out DIR --version VERSION [--exe SlumsMS.exe] [--arg VALUE ...] [--news FILE.json]`;
 
@@ -307,12 +384,14 @@ async function cli(argv) {
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) { console.log(usage); return; }
   const options = { args: [], use: [], playerOwned: [] };
   const names = new Map([['--source', 'source'], ['--out', 'output'], ['--version', 'version'], ['--exe', 'executable'], ['--news', 'news'],
-    ['--layer', 'layer'], ['--release', 'release']]);
+    ['--layer', 'layer'], ['--release', 'release'], ['--launcher', 'launcher'], ['--platform', 'platform']]);
   const repeated = new Map([['--arg', 'args'], ['--use', 'use'], ['--player-owned', 'playerOwned']]);
   let noPlayerOwned = false;
+  let allowNoAccessKey = false;
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === '--no-player-owned') { noPlayerOwned = true; continue; }
+    if (flag === '--allow-no-access-key') { allowNoAccessKey = true; continue; }
     const key = names.get(flag) ?? repeated.get(flag);
     if (!key) throw new Error(`Unknown option: ${flag}\n${usage}`);
     if (index + 1 >= argv.length) throw new Error(`Missing value for ${flag}\n${usage}`);
@@ -331,6 +410,17 @@ async function cli(argv) {
       throw new Error(`Cannot read news file ${options.news}: ${error.message}`);
     }
   }
+  if (Object.hasOwn(options, 'launcher')) {
+    require('output');
+    if (Object.hasOwn(options, 'source') || Object.hasOwn(options, 'layer') || Object.hasOwn(options, 'release') || options.use.length || options.args.length || options.news) {
+      throw new Error('--launcher publishes only the launcher channel; publish game layers and releases separately.');
+    }
+    const result = await publishLauncher({ source: options.launcher, output: options.output, platform: options.platform, executable: options.executable,
+      version: options.version, allowNoAccessKey });
+    console.log(`Published launcher ${result.channel.version} (${result.channel.platform}): ${result.files} files, ${result.bytes} bytes -> ${path.join(path.resolve(options.output), LAUNCHER_CHANNEL_FILE)}`);
+    return;
+  }
+  if (Object.hasOwn(options, 'platform') || allowNoAccessKey) throw new Error('--platform/--allow-no-access-key require --launcher.');
   if (Object.hasOwn(options, 'layer')) {
     require('source', 'output', 'version');
     if (Object.hasOwn(options, 'release') || options.use.length || options.args.length || options.executable || options.news || options.playerOwned.length) {

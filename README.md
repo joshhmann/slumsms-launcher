@@ -14,8 +14,9 @@ Separate SlumsMS-branded launcher and static release publisher for the existing 
 - Play fast-verifies the selected release, then starts its configured executable/arguments with the game folder as working directory. Windows uses Start-Process/ShellExecute so the client can request its own UAC elevation. The launcher does not rewrite client INIs.
 - Settings live in Electron's per-user application-data directory, separate from the game installation.
 - A dependency-free Node publisher makes immutable version folders and publishes manifest.json last.
+- Launcher self-update from its own channel (`launcher.json`) on the same patch server and access key: only changed files download, everything verifies before a swap, and a failed update rolls back.
 
-The player UI is Electron with a sandboxed renderer, context isolation, a narrow preload bridge, local assets/CSP, and no Node access in the page. It has no account/password handling, dashboard requirement, fabricated server/news data, telemetry or launcher-self-update.
+The player UI is Electron with a sandboxed renderer, context isolation, a narrow preload bridge, local assets/CSP, and no Node access in the page. It has no account/password handling, dashboard requirement, fabricated server/news data or telemetry.
 
 ## Develop and package
 
@@ -28,7 +29,7 @@ npm test
 npm run build:win
 ```
 
-If your package manager blocks Electron's dependency install script, review it and run `node node_modules/electron/install.js` to fetch the desktop runtime. Windows build output is `dist/SlumsMS-Launcher-0.1.0-win-x64.zip`. Extract the entire ZIP and run `SlumsMS Launcher.exe`; keep the accompanying resources. The ZIP is unsigned: Windows/SmartScreen trust and actual Windows launch/UAC acceptance still need verification on the target PC. Do not tell players to disable antivirus protections.
+If your package manager blocks Electron's dependency install script, review it and run `node node_modules/electron/install.js` to fetch the desktop runtime. Windows build output is `dist/SlumsMS-Launcher-<version>-win-x64.zip` plus the unpacked `dist/win-unpacked/` (the folder the launcher channel publishes). Extract the entire ZIP and run `SlumsMS Launcher.exe`; keep the accompanying resources. The ZIP is unsigned: Windows/SmartScreen trust and actual Windows launch/UAC acceptance still need verification on the target PC. Do not tell players to disable antivirus protections.
 
 This LXC used a checksum-verified isolated Node runtime under `/tmp/node-v24.22.0-linux-x64/`; Node was not installed globally. Prefix local development commands with `PATH=/tmp/node-v24.22.0-linux-x64/bin:$PATH` while that runtime exists, or install Node normally for a durable developer setup.
 
@@ -107,6 +108,45 @@ The patch server can sit behind HTTP Basic auth (nginx `auth_basic`). The userna
 
 On start the launcher checks the release automatically (fast verify), then shows a single button: Install (no client yet), Update (files changed) or Play (verified). Repair, the game folder and the update server live behind the Settings (gear) button.
 
+## Launcher self-update
+
+Server, client and launcher share one version from 1.3.0 on; the launcher's version is `package.json` `version`. The 1.3.0 ZIP is the last one anyone installs by hand: later builds arrive through the launcher channel.
+
+**Channel.** The launcher has its own channel beside the game manifest, never a game layer, so a game Repair or verify never touches launcher files and a launcher update cannot change the game install:
+
+```text
+release-output/
+  manifest.json                         <- game release (unchanged)
+  launcher.json                         <- launcher channel, written last; serve no-cache
+  launcher/win32-x64/1.3.1/
+    manifest.json                       <- per-file manifest in the layer format (path, size, sha256, url)
+    files/SlumsMS Launcher.exe, resources/app.asar, ...
+```
+
+`launcher.json` is `{ schemaVersion: 1, version, platform, executable, manifestUrl, sha256 }`; `sha256` pins the exact bytes of the per-file manifest, like a layer reference. It is fetched from the feed's origin with the same access key, redirect rules and HTTPS rules as the game manifest.
+
+**On start** (packaged builds only), before the first game check:
+
+1. Fetch `launcher.json` (15 s timeout). No file (404), another platform, the same or an older version: nothing happens. Launchers never downgrade.
+2. Show "Updating launcher…" and stage the new build in `.slumsms-launcher-update/stage-VERSION/` next to the launcher exe. Files whose SHA-256 matches the running launcher are copied locally; only changed files download (with `disableAsarIntegrity` the exe is the stock Electron binary, so a normal release changes only `resources/app.asar`, about 0.7 MB). Downloads use the game installer's code: size and SHA-256 verified, retried, resumable across restarts. No progress for 60 s aborts.
+3. Start a swap helper (the staged launcher's own runtime with `ELECTRON_RUN_AS_NODE`, running `swap-helper.mjs`) and exit only after it confirms it is running.
+4. The helper waits for the old launcher's process to exit (a running Windows exe cannot be overwritten), moves each replaced file into `.slumsms-launcher-update/rollback/`, copies the staged file in (executable last; sharing violations from antivirus or exiting child processes are retried for ~10 s), then starts the new launcher with `--self-updated=VERSION`.
+5. The new launcher writes a health marker once its window has loaded. If it exits before that, or any swap step fails, the helper restores `rollback/` and restarts the old launcher with `--self-update-failed=VERSION`, which skips that version for one session.
+
+Any failure (network, 401, hash mismatch, short download, unwritable folder such as Program Files, helper not starting) is logged and the current launcher carries on to the game check. `rollback/` keeps the previous launcher's replaced files (with `rollback.json`) until the next update; copying them back over the launcher folder undoes an update by hand. A build that reports a different version than the one it was installed as does not update again that session, so a mislabelled build cannot loop. `launcher.config.json` beside the exe is never part of the channel (the publisher refuses a build folder containing one). `--no-self-update` or `SLUMSMS_NO_SELF_UPDATE=1` turns self-update off.
+
+**Log:** `launcher.log` in the per-user app data folder (`%APPDATA%\mapleroot-launcher\launcher.log` on Windows), rotated at 1 MiB; the swap helper writes to the same file. It never contains the access key.
+
+**Publishing a launcher build** (after bumping `version` in `package.json` and building with the friends' access key baked in):
+
+```sh
+npm run build:win                                   # on the build PC; produces dist/win-unpacked/
+# copy dist/win-unpacked/ to the publisher host, e.g. /srv/slums-staging/launcher-1.3.1/
+node tools/publish.mjs --launcher /srv/slums-staging/launcher-1.3.1 --out /srv/release
+```
+
+The publisher reads the version from the build's own `resources/app.asar` (`--version X.Y.Z` is only a cross-check), copies and hashes every file into the immutable `launcher/win32-x64/VERSION/`, and writes `launcher.json` last. It refuses a version that is not newer than the published one, a build without a built-in access key (friends would lose access to every later update; `--allow-no-access-key` for an open server), a missing `SlumsMS Launcher.exe` and a `launcher.config.json` in the build folder. `--platform` (default `win32-x64`) and `--exe` select other targets. Uploading follows the game rule: version folder first, `launcher.json` last. Publishing the launcher never changes `manifest.json`, and publishing a game release never changes `launcher.json`.
+
 ## Fast verify vs Repair
 
 After every successful install, update or repair the launcher writes `.slumsms-launcher/state.json` inside the game folder: for each managed file its relative path, size, mtime and SHA-256.
@@ -168,6 +208,8 @@ The feed is trusted executable-distribution authority. SHA-256 verifies against 
 - Scale smoke (not in the suite): 30k-file layer on Linux, fast verify of an unchanged install ~1.2 s vs ~3.8 s full hash of tiny files; state file ~4 MB.
 - Five passing real-HTTP regression scenarios: fresh nested install/unchanged scan/repair with player-file preservation; corrupt payload preventing partial replacement; immutable publication/symlinks/Windows path aliases; redirected feed resolution; optional release news round-trip and rejection. The redirect regression was observed failing before its fix and passing afterward.
 - Access key HTTP tests (`test/access-key.test.mjs`): Basic header on manifest, layer manifests and files; no header with an empty key; header dropped on a cross-origin redirect and not re-attached when the chain bounces back; 401 gives the access-key error with exactly one request (load and mid-install); saved key overrides the built-in one, built-in key only for the built-in feed; config validation.
+- Self-update tests (`test/self-update.test.mjs`): version ordering and never-downgrade; channel validation; launcher publisher (version from the asar, no-key, no-downgrade and player-config refusals, game manifest untouched); channel fetch with Basic auth, 404 as no update, 401 and tampered manifest hash; staging downloads only changed files and resumes without downloads; corrupt, truncated and 503 downloads leave the launcher unchanged; unwritable folder; helper swap with rollback copy and relaunch; rollback when the new build exits before its first window; rollback when a copy fails mid-swap; helper that cannot start; old launcher that never exits; cleanup.
+- Self-update end to end with real Electron on Linux (Xvfb, linux-x64 builds 1.3.0 and 1.3.1, local Basic-auth server): 1.3.0 showed "Updating launcher", downloaded only `resources/app.asar`, the `ELECTRON_RUN_AS_NODE` helper swapped it and started 1.3.1, which reported healthy and went on to the game check; a corrupt download and a wrong key each left 1.3.0 running and logged. The Windows swap itself (exe/DLL locks, antivirus, SmartScreen) still needs a run on Windows.
 - Launcher config unit tests: layered config files, feed URL rules, bundled-client detection beside or above the launcher, and the standalone default folder.
 - Standalone real static publication, download, hash scan and single-file repair smoke.
 - Actual Electron window via a virtual Linux display: Check → update-needed; Install → verified-ready; Play → real throwaway helper process with correct working directory and argument containing a space; invalid feed → displayed404 error → recovery after saving the correct feed.
