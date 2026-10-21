@@ -54,9 +54,9 @@ pub fn explain_missing_webview2() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_ICONWARNING, MB_YESNO};
     let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
     let text = wide(
-        "SlumsMS Launcher needs the Microsoft Edge WebView2 Runtime, which is not installed on this PC.\n\n\
+        "SlumsMS Launcher needs the Microsoft Edge WebView2 Runtime, which is missing or not working on this PC.\n\n\
          It is free and comes from Microsoft (Windows 11 and up-to-date Windows 10 already have it).\n\n\
-         Open the download page now? Install the \"Evergreen\" runtime, then start the launcher again.",
+         Open the download page now? Install (or repair) the \"Evergreen\" runtime, then start the launcher again.",
     );
     let title = wide("SlumsMS Launcher");
     // SAFETY: valid NUL-terminated strings; no owner window.

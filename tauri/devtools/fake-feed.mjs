@@ -54,6 +54,7 @@ const clientFiles = (label) => ({
 });
 
 async function build(out, { count, version }) {
+  await fs.mkdir(out, { recursive: true });
   const stage = await fs.mkdtemp(path.join(out, '.stage-'));
   try {
     await writeTree(path.join(stage, 'base'), syntheticBase(count));

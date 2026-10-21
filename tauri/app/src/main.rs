@@ -15,10 +15,17 @@ fn main() {
     let args = Args::parse(std::env::args().skip(1).collect());
     // The release build aborts on panic; leave a note where support can find it.
     let crash_dir = args.data_dir.clone().unwrap_or_else(std::env::temp_dir);
+    #[cfg(windows)]
+    let quiet = args.self_test.is_some();
     std::panic::set_hook(Box::new(move |info| {
         let text = format!("{} SlumsMS Launcher {VERSION} crashed: {info}\n", slums_core::release::iso_now());
         eprintln!("{text}");
         let _ = std::fs::OpenOptions::new().create(true).append(true).open(crash_dir.join("slumsms-launcher-crash.log")).and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
+        // A WebView2 that is missing, broken or blocked is the one start-up failure players can fix.
+        #[cfg(windows)]
+        if !quiet && text.contains("WebView2") {
+            platform::explain_missing_webview2();
+        }
     }));
     if args.version {
         platform::print_out(&format!("SlumsMS Launcher {VERSION}"));
@@ -51,6 +58,12 @@ fn main() {
         .setup(move |app| {
             let launcher = Launcher::new(app.handle().clone(), setup_args.clone(), started)?;
             app.manage(Arc::new(launcher));
+            // The window is created hidden (no white flash); a self-test never shows it.
+            if setup_args.self_test.is_none() {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
