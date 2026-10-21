@@ -214,7 +214,8 @@ footer { display: flex; align-items: baseline; gap: 8px; margin-top: 24px; paddi
 .saved-hint[data-kind="pending"] { color: var(--orange-light); }
 
 /* Channels (Live / Test / RC) and the one-time folder question */
-.channel-value { display: inline-flex; align-items: center; gap: 8px; }
+.channel-value { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+@media (max-width: 720px) { .channel-value { justify-content: flex-start; } }
 .channel-select { padding: 2px 6px; border: 1px solid var(--gold-light); border-radius: 4px; color: #fff; background: #0c1222; font: inherit; font-size: 12px; font-weight: 700; }
 .channel-select:disabled { opacity: .6; }
 .release-detail[data-channel="test"] #channel-name, .release-detail[data-channel="rc"] #channel-name { color: var(--orange-light); font-weight: 700; }

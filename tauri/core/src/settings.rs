@@ -177,13 +177,14 @@ pub fn migrate_legacy_settings(legacy: &Value, live_feed_url: &str, folder: Opti
     let conflict = from_folder.is_some_and(|f| f != channel);
     let release = folder.record.map(|r| r.release.clone()).unwrap_or_default();
     let article = if suggested == Channel::Rc { "an" } else { "a" };
+    let old_setting = if conflict { format!(", but the old launcher was set to the {} channel", channel.label()) } else { String::new() };
     let message = format!(
-        "This folder looks like {article} {} install{}:\n{dir}\nUse it as the {} folder?",
+        "This folder looks like {article} {} install{}{old_setting}:\n{dir}\nUse it as the {} folder?",
         suggested.label(),
         if release.is_empty() { String::new() } else { format!(" ({release})") },
         suggested.label()
     );
-    notes.push(format!("Old game folder {dir} does not look like Live; asking."));
+    notes.push(format!("Old game folder {dir}: the folder says {}, the old feed says {}; asking.", from_folder.map(Channel::label).unwrap_or("nothing"), channel.label()));
     Migration { settings, question: Some(MigrationQuestion { dir, suggested, conflict, release, message }), notes }
 }
 
@@ -270,7 +271,7 @@ mod tests {
         assert_eq!(m.settings.folders.live, "");
         let q = m.question.unwrap();
         assert_eq!((q.suggested, q.conflict), (Channel::Test, true));
-        assert!(q.message.contains("looks like a Test install (1.4.1-test)"), "{}", q.message);
+        assert!(q.message.starts_with("This folder looks like a Test install (1.4.1-test), but the old launcher was set to the RC channel:"), "{}", q.message);
         let mut s = m.settings.clone();
         apply_migration_answer(&mut s, &q, Some(Channel::Test));
         assert_eq!(s.folders.test, "Z:\\SlumsMS-test");
