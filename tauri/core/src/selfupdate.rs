@@ -117,7 +117,18 @@ pub fn start_and_confirm(rollback: &Rollback, version: &str, args: &[String], ti
     let _ = std::fs::remove_file(&marker);
     let mut command = Command::new(&rollback.exe);
     command.args(args).arg(format!("--self-updated={version}"));
-    let reason = match command.spawn() {
+    // On Linux a freshly written exe can briefly be "text file busy" while another thread forks.
+    let mut spawned = command.spawn();
+    for _ in 0..20 {
+        match &spawned {
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(Duration::from_millis(50));
+                spawned = command.spawn();
+            }
+            _ => break,
+        }
+    }
+    let reason = match spawned {
         Err(e) => format!("the new launcher did not start: {e}"),
         Ok(mut child) => match wait_for(&marker, &mut child, timeout) {
             Ok(()) => return Outcome::Healthy,
@@ -228,7 +239,7 @@ mod tests {
 
     #[test]
     fn a_build_that_exits_or_hangs_before_ready_is_rolled_back() {
-        for (body, timeout) in [("exit 3", 10), ("sleep 30", 1)] {
+        for (body, timeout) in [("exit 3", 10), ("exec sleep 30", 1)] {
             let dir = scratch();
             let exe = launcher(&dir, "echo old");
             let staged = stage(&exe, "1.5.1", format!("#!/bin/sh\n{body}\n").as_bytes()).unwrap();
