@@ -46,7 +46,6 @@
             <div class="release-row"><span class="detail-label">INSTALLED</span><span class="release-value" id="installed-version">Unknown</span></div>
             <div class="release-row"><span class="detail-label">AVAILABLE</span><span class="release-value" id="available-version">Checking…</span></div>
             <span class="release-note" id="release-note" hidden></span>
-            <span class="feed-line" id="feed-line" data-warn="false"></span>
           </div>
         </section>
 
@@ -79,7 +78,6 @@
           <div class="button-row">
             <button class="button button-secondary" id="choose-folder" type="button">Change folder</button>
             <button class="button button-quiet" id="open-folder" type="button">Open folder</button>
-            <button class="button button-quiet" id="reset-folder" type="button" disabled>Use default folder</button>
           </div>
         </section>
         <section class="setting" aria-labelledby="access-key-label">
@@ -108,7 +106,7 @@
               <button class="button button-secondary" id="save-feed" type="submit" disabled>Save</button>
             </div>
             <p class="field-notice" id="feed-notice" aria-live="polite"></p>
-            <button class="link-button" id="reset-feed" type="button" disabled>Use default feed</button>
+            <button class="link-button" id="reset-feed" type="button" hidden>Reset to default</button>
           </form>
         </details>
         <p class="error-message" id="settings-error" role="alert" hidden></p>

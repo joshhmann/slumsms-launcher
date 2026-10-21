@@ -82,8 +82,6 @@ h1 { margin: 0; color: #fff; font-size: clamp(22px, 3.4vw, 28px); line-height: 1
 .release-detail[data-kind="update-available"] { border-color: var(--orange); box-shadow: 0 0 8px #e8891c55; }
 .release-detail[data-kind="update-available"] #available-version { color: var(--orange-light); }
 .release-detail[data-kind="update-available"] .release-note { border-color: var(--orange-ink); color: #2a1404; background: var(--orange-light); }
-.feed-line { font-size: 10px; color: var(--muted); overflow-wrap: anywhere; }
-.feed-line[data-warn="true"] { color: var(--orange-light); font-weight: 700; }
 #release-version { font-size: 14px; font-weight: 700; color: #fff; overflow-wrap: anywhere; }
 
 /* Release notes from the manifest */

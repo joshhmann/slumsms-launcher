@@ -1,4 +1,4 @@
-import { versionStatus, versionFooter, formatTimeLeft, feedLabel } from './version-status.mjs';
+import { versionStatus, versionFooter, formatTimeLeft } from './version-status.mjs';
 import { GAME_OPTIONS } from './game-options.mjs';
 
 const elements = Object.fromEntries([
@@ -7,7 +7,7 @@ const elements = Object.fromEntries([
   'news', 'news-list', 'progress-area', 'progress-label', 'progress-detail', 'operation-progress',
   'action-help', 'play', 'play-label', 'error-message', 'open-settings', 'settings-dialog',
   'close-settings', 'install-dir', 'folder-source', 'choose-folder', 'open-folder', 'repair-files',
-  'feed-line', 'reset-folder', 'feed-form', 'feed-url', 'feed-help', 'feed-notice', 'save-feed', 'reset-feed', 'settings-error',
+  'feed-form', 'feed-url', 'feed-help', 'feed-notice', 'save-feed', 'reset-feed', 'settings-error',
   'version-info', 'open-options', 'options-dialog', 'close-options', 'options-notice', 'options-form', 'restore-options', 'options-saved', 'access-key-form', 'access-key', 'access-key-help', 'save-access-key', 'clear-access-key',
 ].map((id) => [id, document.getElementById(id)]));
 
@@ -32,10 +32,10 @@ const phaseHeadings = {
   error: 'Let’s get you back on track.',
 };
 const busyPhases = new Set(['checking', 'updating', 'self-updating', 'launching']);
-const bridgeMethods = ['settings', 'saveFeed', 'resetFeed', 'saveAccessKey', 'clearAccessKey', 'chooseFolder', 'openFolder', 'check', 'update', 'repair', 'play', 'resetFolder', 'onState'];
+const bridgeMethods = ['settings', 'saveFeed', 'resetFeed', 'saveAccessKey', 'clearAccessKey', 'chooseFolder', 'openFolder', 'check', 'update', 'repair', 'play', 'onState'];
 const bridge = window.launcher;
 const bridgeAvailable = bridgeMethods.every((method) => typeof bridge?.[method] === 'function');
-const configuration = { feedUrl: '', installDir: '', defaultFeedUrl: '', liveFeedUrl: '', feedOverridden: false, installDirSource: 'default', accessKeySource: 'none', appVersion: '' };
+const configuration = { feedUrl: '', installDir: '', defaultFeedUrl: '', feedOverridden: false, installDirSource: 'default', accessKeySource: 'none', appVersion: '' };
 let state = { phase: 'idle', message: 'Loading launcher settings…', canPlay: false };
 let initialized = false;
 let operation = null;
@@ -337,10 +337,6 @@ function render() {
   elements['change-folder-inline'].disabled = blocked;
   renderVersions();
   renderNews();
-  const feed = feedLabel(configuration.feedUrl, configuration);
-  elements['feed-line'].textContent = initialized ? feed.text : '';
-  elements['feed-line'].title = configuration.feedUrl;
-  elements['feed-line'].dataset.warn = feed.warn ? 'true' : 'false';
 
   elements.play.dataset.action = action.kind;
   elements.play.disabled = blocked;
@@ -367,8 +363,8 @@ function render() {
   elements['feed-url'].disabled = blocked;
   elements['save-feed'].disabled = blocked || !dirty;
   elements['save-feed'].textContent = operation === 'save' ? 'Saving…' : 'Save';
-  elements['reset-feed'].disabled = blocked || !configuration.feedOverridden || !configuration.defaultFeedUrl;
-  elements['reset-folder'].disabled = blocked || configuration.installDirSource !== 'saved';
+  elements['reset-feed'].hidden = !configuration.feedOverridden || !configuration.defaultFeedUrl;
+  elements['reset-feed'].disabled = blocked;
   elements['feed-help'].textContent = configuration.feedOverridden && configuration.defaultFeedUrl
     ? `Using a custom server. Default: ${configuration.defaultFeedUrl}`
     : 'Only change this if your server staff gave you a different manifest URL.';
@@ -480,7 +476,6 @@ elements['clear-access-key'].addEventListener('click', () => {
   void changeSettings('access-key', () => bridge.clearAccessKey(), { recheck: true });
 });
 elements['reset-feed'].addEventListener('click', () => void changeSettings('save', () => bridge.resetFeed()));
-elements['reset-folder'].addEventListener('click', () => void changeSettings('folder', () => bridge.resetFolder()));
 const chooseFolder = () => void changeSettings('folder', () => bridge.chooseFolder());
 elements['choose-folder'].addEventListener('click', chooseFolder);
 elements['change-folder-inline'].addEventListener('click', chooseFolder);

@@ -1,12 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
-import { writeFile, appendFile, mkdir, rename, stat } from 'node:fs/promises';
+import { readFile, writeFile, appendFile, mkdir, rename, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { loadRelease, inspectRelease, installRelease, loadLauncherChannel, readInstalledRecord, checkAvailableRelease } from './updater.mjs';
 import { launcherUpdateDecision, prepareLauncherUpdate, startLauncherSwap, cleanupLauncherUpdates, healthyMarker } from './self-update.mjs';
 import { reuseVerified, playPlan } from './version-status.mjs';
-import { loadInstallSettings, writeInstallSettings, settingsPath } from './settings-store.mjs';
 import { readGameConfig, writeGameConfig, gameRunning } from './game-config.mjs';
 import { DEFAULT_VALUES, validateChanges } from './game-options.mjs';
 import { readLauncherConfig, detectBundledClient, standaloneInstallDir, validateFeedUrl, validAccessKey, effectiveAccessKey } from './launcher-config.mjs';
@@ -14,17 +13,15 @@ import { readLauncherConfig, detectBundledClient, standaloneInstallDir, validate
 const here = path.dirname(fileURLToPath(import.meta.url));
 const page = pathToFileURL(path.join(here, 'index.html')).href;
 let window;
-// settings.json (per-user app data, never the game folder, one per launcher install folder; see
-// settings-store.mjs) holds only the player's overrides; launcher.config.json supplies the defaults. The access key never leaves the main process.
+// settings.json (per-user app data, never the game folder) holds only the player's overrides;
+// launcher.config.json supplies the defaults. The access key never leaves the main process.
 let settings = { feedUrl: '', installDir: '', accessKey: '', pendingGameOptions: null };
 let config = { feedUrl: '', clientExecutable: '', downloadConcurrency: 12, accessKey: '' };
 let bundledDir = '';
-// The feed shipped inside the app (src/launcher.config.json): the one the main screen calls "live".
-let liveFeedUrl = '';
 let busy = false;
 let state = { phase: 'idle', message: 'Checking for updates…', canPlay: false, installed: { status: 'unknown' }, available: { status: 'checking' } };
 const AVAILABLE_INTERVAL_MS = 10 * 60_000;
-const settingsFile = () => settingsPath(app.getPath('userData'), path.dirname(app.getPath('exe')));
+const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
 const logFile = () => path.join(app.getPath('userData'), 'launcher.log');
 const argument = flag => process.argv.find(value => value.startsWith(flag))?.slice(flag.length);
 
@@ -46,7 +43,6 @@ function effective() {
     feedUrl: settings.feedUrl || config.feedUrl,
     installDir: settings.installDir || bundledDir || standaloneInstallDir({ home: app.getPath('home') }),
     defaultFeedUrl: config.feedUrl,
-    liveFeedUrl,
     feedOverridden: Boolean(settings.feedUrl),
     installDirSource: settings.installDir ? 'saved' : bundledDir ? 'bundled' : 'default',
     accessKeySource: settings.accessKey ? 'saved' : accessKey() ? 'built-in' : 'none',
@@ -58,7 +54,10 @@ function send(patch) {
   if (window && !window.isDestroyed()) window.webContents.send('launcher:state', state);
 }
 async function persist() {
-  await writeInstallSettings(settingsFile(), JSON.stringify(settings, null, 2));
+  await mkdir(path.dirname(settingsFile()), { recursive: true });
+  const temporary = `${settingsFile()}.tmp`;
+  await writeFile(temporary, JSON.stringify(settings, null, 2), { mode: 0o600 });
+  await rename(temporary, settingsFile());
 }
 function requireSettings() {
   const current = effective();
@@ -71,7 +70,7 @@ async function exists(file) {
 async function operation(phase, action) {
   if (busy) throw new Error('A launcher operation is already running.');
   busy = true;
-  send({ phase, canPlay: false, accessKeyNeeded: false, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, bytesPerSecond: null, etaSeconds: null });
+  send({ phase, canPlay: false, accessKeyNeeded: false, offlinePlay: false, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, bytesPerSecond: null, etaSeconds: null });
   try { return await action(); }
   catch (error) {
     const denied = error.code === 'ACCESS_KEY_REQUIRED';
@@ -285,10 +284,7 @@ else {
   app.on('second-instance', () => { if (window?.isMinimized()) window.restore(); window?.focus(); });
   app.whenReady().then(async () => {
     try {
-      const stored = await loadInstallSettings({ userData: app.getPath('userData'), launcherDir: path.dirname(app.getPath('exe')) });
-      if (stored.migrated) await log(`Settings: moved the shared settings.json to this launcher's own ${stored.file}.`);
-      if (stored.text === null) throw Object.assign(new Error('no settings'), { code: 'ENOENT' });
-      const saved = JSON.parse(stored.text);
+      const saved = JSON.parse(await readFile(settingsFile(), 'utf8'));
       settings = { feedUrl: typeof saved.feedUrl === 'string' ? saved.feedUrl : '', installDir: typeof saved.installDir === 'string' ? saved.installDir : '',
         accessKey: validAccessKey(saved.accessKey) ? saved.accessKey : '', pendingGameOptions: readPending(saved.pendingGameOptions) };
     } catch (error) { if (error.code !== 'ENOENT') state.message = `Could not read saved settings: ${error.message}`; }
@@ -300,7 +296,6 @@ else {
     const launcherDir = path.dirname(app.getPath('exe'));
     try {
       config = await readLauncherConfig([path.join(here, 'launcher.config.json'), ...(app.isPackaged ? [path.join(launcherDir, 'launcher.config.json')] : [])]);
-      liveFeedUrl = (await readLauncherConfig([path.join(here, 'launcher.config.json')])).feedUrl;
     } catch (error) { state = { ...state, phase: 'error', message: error.message }; }
     if (app.isPackaged) bundledDir = await detectBundledClient(launcherDir, config.clientExecutable);
     window = new BrowserWindow({ width: 1060, height: 860, minWidth: 860, minHeight: 700, backgroundColor: '#16203a',
@@ -359,13 +354,6 @@ else {
       }
       return effective();
     });
-    handle('resetFolder', async () => {
-      if (busy) throw new Error('Wait for the current operation to finish.');
-      settings.installDir = ''; await persist();
-      send({ phase: 'idle', message: 'Game folder reset to the default.', canPlay: false });
-      void refreshInstalled().catch(error => log(`Version check failed: ${error.message}`));
-      return effective();
-    });
     handle('openFolder', async () => {
       const { installDir } = effective();
       if (!(await exists(installDir))) throw new Error('The game folder does not exist yet. Install the game first.');
@@ -377,8 +365,8 @@ else {
     const installFiles = async (mode, message) => {
       const { feedUrl, installDir } = requireSettings();
       const release = await loadRelease(feedUrl, { installDir, accessKey: accessKey() });
-      send({ phase: 'updating', ...(message ? { message } : {}) });
-      send({ version: release.version, news: release.news ?? [], available: availableFrom(release), message: mode === 'full' ? 'Verifying every file and repairing damage.' : 'Checking what is already installed.' });
+      send({ phase: 'updating', version: release.version, news: release.news ?? [], available: availableFrom(release),
+        message: message || (mode === 'full' ? 'Verifying every file and repairing damage.' : 'Checking what is already installed.') });
       installAbort = new AbortController();
       try {
         await installRelease(installDir, release, progress, { mode, concurrency: config.downloadConcurrency, signal: installAbort.signal });

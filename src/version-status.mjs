@@ -86,26 +86,3 @@ export function playPlan({ offered, record }) {
   return 'verify';
 }
 
-/**
- * The feed line on the main screen: "Feed: live" for the shipped live feed, otherwise a short name
- * ("test (launcher-rc)" on the live host, "custom (host/dir)" elsewhere). `warn` when the feed is not
- * this build's default, so a feed changed by hand (or by another launcher) is never silent.
- */
-export function feedLabel(feedUrl, { liveFeedUrl = '', defaultFeedUrl = '' } = {}) {
-  if (!feedUrl) return { text: 'Feed: none set', warn: true, name: '' };
-  let name;
-  try {
-    const url = new URL(feedUrl);
-    const live = liveFeedUrl ? new URL(liveFeedUrl) : null;
-    const folders = url.pathname.split('/').filter(Boolean);
-    if (folders.length && /\.json$/iu.test(folders.at(-1))) folders.pop();
-    const folder = folders.at(-1) ?? '';
-    if (feedUrl === liveFeedUrl) name = 'live';
-    else if (live && url.host === live.host) name = folder ? `test (${folder})` : 'test';
-    else name = `custom (${url.host}${folder ? `/${folder}` : ''})`;
-  } catch {
-    name = 'custom';
-  }
-  const warn = feedUrl !== defaultFeedUrl;
-  return { name, warn, text: `Feed: ${name}${warn ? ' · not this launcher’s default' : ''}` };
-}
