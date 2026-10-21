@@ -5,7 +5,7 @@ import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
-import { validateManifest, validateLayerManifest, validateLauncherChannel, mergeLayers, layerName, safeComponent, launcherLayerName, LAUNCHER_CHANNEL_FILE, LAUNCHER_PLATFORMS } from '../src/updater.mjs';
+import { validateManifest, validateLayerManifest, validateLauncherChannel, mergeLayers, layerName, safeComponent, launcherLayerName, launcherVersion, LAUNCHER_CHANNEL_FILE, LAUNCHER_PLATFORMS } from '../src/updater.mjs';
 import { compareVersions } from '../src/self-update.mjs';
 import { validatePackIndex, groupPacks, DEFAULT_PACK_SIZE, PACK_INDEX_FILE } from '../src/packs.mjs';
 
@@ -470,6 +470,73 @@ export async function publishLauncher({ source, output, platform = 'win32-x64', 
   });
 }
 
+/** Where the Tauri launcher's update manifest lives in a channel folder (matches the no-cache rule for launcher.json). */
+export const TAURI_CHANNEL_FILE = 'tauri/launcher.json';
+export const TAURI_EXECUTABLE = 'SlumsMS-Launcher.exe';
+
+/** The tab-separated fields of a minisign trusted comment, from a Tauri .sig file (base64 of the signature text). */
+export function tauriSignatureFields(signatureBase64) {
+  let text;
+  try { text = Buffer.from(signatureBase64.trim(), 'base64').toString('utf8'); } catch { text = ''; }
+  const line = text.split(/\r?\n/u).find((entry) => entry.startsWith('trusted comment: '));
+  if (!line || !/^untrusted comment: /u.test(text)) throw new Error('The signature file is not a Tauri/minisign signature (cargo tauri signer sign).');
+  return Object.fromEntries(line.slice('trusted comment: '.length).split('\t').map((field) => { const at = field.indexOf(':'); return at < 0 ? [field, ''] : [field.slice(0, at), field.slice(at + 1)]; }));
+}
+
+/**
+ * Publish a signed Tauri launcher exe to a channel folder (Live: the release root; Test/RC:
+ * launcher-test/, launcher-rc/): OUT/tauri/VERSION/SlumsMS-Launcher.exe (immutable), then
+ * OUT/tauri/launcher.json last, in the Tauri updater's static JSON format. `baseUrl` is the public
+ * URL of OUT (the updater needs absolute URLs; the launcher refuses one that is not on the feed's
+ * origin). The signature must be bound to the same version (cargo tauri signer sign --app-version).
+ */
+export async function publishTauriLauncher({ exe, signature, output, version, baseUrl, notes = '', now = new Date() } = {}) {
+  launcherVersion(version, '--version');
+  let base;
+  try { base = new URL(baseUrl); } catch { throw new Error('--base-url must be the absolute public URL of the --out folder.'); }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname);
+  if (base.protocol !== 'https:' && !(base.protocol === 'http:' && loopback)) throw new Error('--base-url must use HTTPS.');
+  if (base.username || base.password || base.search || base.hash) throw new Error('--base-url cannot carry credentials, a query or a fragment.');
+  if (!base.pathname.endsWith('/')) base.pathname += '/';
+  const signatureText = (await fs.readFile(signature, 'utf8')).trim();
+  const fields = tauriSignatureFields(signatureText);
+  if (fields.version !== version) throw new Error(`The signature is for version ${fields.version ?? '(none)'}, not ${version}; sign with --app-version ${version}.`);
+  const bytes = await fs.readFile(exe);
+  if (bytes.length < 1024 || bytes[0] !== 0x4d || bytes[1] !== 0x5a) throw new Error(`${exe} is not a Windows executable.`);
+  const destination = path.resolve(output);
+  await fs.mkdir(destination, { recursive: true });
+  return withLock(destination, async () => {
+    const channelPath = path.join(destination, ...TAURI_CHANNEL_FILE.split('/'));
+    try {
+      const previous = JSON.parse(await fs.readFile(channelPath, 'utf8'));
+      if (typeof previous?.version === 'string' && compareVersions(version, previous.version) <= 0) {
+        throw Object.assign(new Error(`Launcher ${previous.version} is already published here; ${version} is not newer (launchers never downgrade).`), { refuse: true });
+      }
+    } catch (error) { if (error.refuse) throw error; }
+    const versionDir = path.join(destination, 'tauri', version);
+    if (await statOrMissing(versionDir)) throw new Error(`${versionDir} already exists; published versions are immutable.`);
+    const temporaryDir = path.join(destination, 'tauri', `.publish-${randomUUID()}`);
+    await fs.mkdir(temporaryDir, { recursive: true });
+    try {
+      await fs.writeFile(path.join(temporaryDir, TAURI_EXECUTABLE), bytes, { flag: 'wx', mode: 0o644 });
+      await fs.chmod(temporaryDir, 0o755);
+      await fs.rename(temporaryDir, versionDir);
+    } catch (error) { await fs.rm(temporaryDir, { recursive: true, force: true }); throw error; }
+    const channel = {
+      version,
+      notes,
+      pub_date: now.toISOString(),
+      platforms: { 'windows-x86_64': { signature: signatureText, url: new URL(`tauri/${encodeSegment(version)}/${TAURI_EXECUTABLE}`, base).href } },
+    };
+    const temporary = path.join(destination, 'tauri', `.launcher-${randomUUID()}.tmp`);
+    try {
+      await fs.writeFile(temporary, `${JSON.stringify(channel, null, 2)}\n`, { flag: 'wx', mode: 0o644 });
+      await fs.rename(temporary, channelPath);
+    } finally { await fs.rm(temporary, { force: true }); }
+    return { channel, bytes: bytes.length, sha256: digestBytes(bytes) };
+  });
+}
+
 const usage = `Usage:
   Publish a layer (immutable OUT/layers/NAME/VERSION/):
     node tools/publish.mjs --layer NAME --source DIR --out DIR --version VERSION
@@ -478,6 +545,8 @@ const usage = `Usage:
   Point the release at published layers (writes OUT/manifest.json last; later layers override earlier):
     node tools/publish.mjs --release VERSION --out DIR --use base@BASE_VERSION --use client@CLIENT_VERSION
       [--exe SlumsMS.exe] [--arg VALUE ...] [--news FILE.json] [--player-owned PATH ...] [--no-player-owned] [--no-packs]
+  Publish a signed Tauri launcher exe to a channel folder (OUT/tauri/VERSION/, then OUT/tauri/launcher.json):
+    node tools/publish.mjs --tauri-launcher EXE --signature EXE.sig --version X.Y.Z --base-url https://HOST/[launcher-test/] --out DIR [--notes TEXT]
   Publish a launcher build to the launcher channel (OUT/launcher/PLATFORM/VERSION/, then OUT/launcher.json):
     node tools/publish.mjs --launcher dist/win-unpacked --out DIR [--platform win32-x64] [--version X.Y.Z] [--allow-no-access-key]
   Legacy single-folder release (schemaVersion 1):
@@ -487,7 +556,8 @@ async function cli(argv) {
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) { console.log(usage); return; }
   const options = { args: [], use: [], playerOwned: [] };
   const names = new Map([['--source', 'source'], ['--out', 'output'], ['--version', 'version'], ['--exe', 'executable'], ['--news', 'news'],
-    ['--layer', 'layer'], ['--release', 'release'], ['--launcher', 'launcher'], ['--platform', 'platform'], ['--packs', 'packs'], ['--pack-size', 'packSize']]);
+    ['--layer', 'layer'], ['--release', 'release'], ['--launcher', 'launcher'], ['--platform', 'platform'], ['--packs', 'packs'], ['--pack-size', 'packSize'],
+    ['--tauri-launcher', 'tauriLauncher'], ['--signature', 'signature'], ['--base-url', 'baseUrl'], ['--notes', 'notes']]);
   const repeated = new Map([['--arg', 'args'], ['--use', 'use'], ['--player-owned', 'playerOwned']]);
   let noPlayerOwned = false;
   let allowNoAccessKey = false;
@@ -514,6 +584,12 @@ async function cli(argv) {
     try { options.news = JSON.parse(await fs.readFile(options.news, 'utf8')); } catch (error) {
       throw new Error(`Cannot read news file ${options.news}: ${error.message}`);
     }
+  }
+  if (Object.hasOwn(options, 'tauriLauncher')) {
+    require('output', 'signature', 'version', 'baseUrl');
+    const result = await publishTauriLauncher({ exe: options.tauriLauncher, signature: options.signature, output: options.output, version: options.version, baseUrl: options.baseUrl, notes: options.notes ?? '' });
+    console.log(`Published the Tauri launcher ${result.channel.version}: ${result.bytes} bytes, SHA-256 ${result.sha256} -> ${path.join(path.resolve(options.output), ...TAURI_CHANNEL_FILE.split('/'))}`);
+    return;
   }
   if (Object.hasOwn(options, 'launcher')) {
     require('output');
