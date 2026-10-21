@@ -1,0 +1,39 @@
+--- /root/work/deploy/nginx-dev-channels/slums-patch.current	2026-10-21 12:49:45.539062042 -0700
++++ /root/work/deploy/nginx-dev-channels/slums-patch.new	2026-10-21 12:49:45.541062071 -0700
+@@ -1,4 +1,9 @@
+ # SlumsMS client patch files, served to the launcher through Caddy (slumspatch.asslorde.com -> 192.168.0.164:8090).
++# Two access tiers (HTTP Basic):
++#   /etc/nginx/slums-patch.htpasswd      players file: user "slums" (player key) + user "slumsdev" (dev key)
++#   /etc/nginx/slums-patch-dev.htpasswd  dev-only file: user "slumsdev"
++# Live (everything outside /launcher-test/ and /launcher-rc/, including the shared /layers/) accepts either user.
++# The Test and RC channels, including layers reached through their layers -> ../layers symlinks, are dev-only.
+ server {
+     listen 8090;
+     root /srv/slums-patch;
+@@ -8,6 +13,26 @@
+     sendfile on;
+     tcp_nopush on;
+ 
++    # Test and RC channels: dev key only. ^~ stops the regex locations below from catching these URIs.
++    location ^~ /launcher-test/ {
++        auth_basic_user_file /etc/nginx/slums-patch-dev.htpasswd;
++        location ~ (/manifest\.json$|/launcher\.json$) {
++            add_header Cache-Control "no-cache";
++            try_files $uri =404;
++        }
++        add_header Cache-Control "public, max-age=31536000, immutable";
++        try_files $uri =404;
++    }
++    location ^~ /launcher-rc/ {
++        auth_basic_user_file /etc/nginx/slums-patch-dev.htpasswd;
++        location ~ (/manifest\.json$|/launcher\.json$) {
++            add_header Cache-Control "no-cache";
++            try_files $uri =404;
++        }
++        add_header Cache-Control "public, max-age=31536000, immutable";
++        try_files $uri =404;
++    }
++
+     # Release manifests change with every release: always revalidate.
+     location ~ (/manifest\.json$|/launcher\.json$) {
+         add_header Cache-Control "no-cache";

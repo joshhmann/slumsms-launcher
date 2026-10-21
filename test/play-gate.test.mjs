@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile, readdir, rm } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { playPlan, feedLabel } from '../src/version-status.mjs';
-import { installKey, settingsPath, loadInstallSettings, writeInstallSettings } from '../src/settings-store.mjs';
+import { installKey, settingsPath, loadInstallSettings, writeInstallSettings, backupLegacySettings } from '../src/settings-store.mjs';
 
 const ok = (sha, version = '1.4.1') => ({ status: 'ok', version, layers: [], manifestSha256: sha });
 
@@ -50,24 +50,21 @@ test('settings are kept per launcher folder (case-insensitive on Windows)', () =
   assert.notEqual(settingsPath('/u', '/opt/a'), settingsPath('/u', '/opt/b'));
 });
 
-test('the old shared settings.json moves to the first launcher that starts, once', async (t) => {
+test('the old shared settings.json is offered for migration, backed up once and left in place', async (t) => {
   const userData = await scratch(t);
   const shared = JSON.stringify({ feedUrl: 'https://slumspatch.asslorde.com/launcher-rc/manifest.json', installDir: 'D:\\test' });
   await writeFile(path.join(userData, 'settings.json'), shared);
   const first = await loadInstallSettings({ userData, launcherDir: '/launchers/test' });
-  assert.equal(first.migrated, true);
-  assert.equal(first.text, shared);
-  assert.equal(await readFile(first.file, 'utf8'), shared);
-  // The other launcher starts from its defaults instead of inheriting the test feed and folder.
-  const second = await loadInstallSettings({ userData, launcherDir: '/launchers/everyday' });
-  assert.deepEqual([second.migrated, second.text], [false, null]);
-  // And each reads back only its own file afterwards.
-  await writeInstallSettings(second.file, '{"installDir":"Z:\\\\SlumsMS"}');
-  assert.equal((await loadInstallSettings({ userData, launcherDir: '/launchers/test' })).text, shared);
-  assert.equal((await loadInstallSettings({ userData, launcherDir: '/launchers/everyday' })).text, '{"installDir":"Z:\\\\SlumsMS"}');
-  const names = await readdir(userData);
-  assert.ok(!names.includes('settings.json'));
-  assert.ok(names.some(name => name.startsWith('settings.json.migrated-')));
+  assert.deepEqual([first.text, first.legacyText], [null, shared]);
+  const backup = await backupLegacySettings(userData);
+  assert.equal(await readFile(backup, 'utf8'), shared);
+  await writeFile(path.join(userData, 'settings.json'), '{}');
+  await backupLegacySettings(userData);
+  assert.equal(await readFile(backup, 'utf8'), shared);
+  await writeInstallSettings(first.file, '{"settingsVersion":2}');
+  const again = await loadInstallSettings({ userData, launcherDir: '/launchers/test' });
+  assert.deepEqual([again.text, again.legacyText], ['{"settingsVersion":2}', null]);
+  assert.ok((await readdir(userData)).includes('settings.json'));
 });
 
 test('no settings anywhere reads as none', async (t) => {
