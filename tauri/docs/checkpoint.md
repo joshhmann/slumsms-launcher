@@ -21,7 +21,7 @@ against a local fake feed served with Basic auth.
 
 | | |
 | --- | --- |
-| exe size | 5,273,600 bytes |
+| exe size | 5,273,600 bytes (final build, commit 2805cf4: 5,275,136 bytes, SHA-256 `C223914A34A8C134EB43DA2F0EA2D0135C84CC81E9D8D8408A059E4B0313B96E`) |
 | `--version` | `SlumsMS Launcher 1.5.0` |
 | self-test, window ready | 344–363 ms |
 | self-test, first install complete | ~0.5 s from launch |

@@ -7,7 +7,7 @@ Electron preload bridge.
 
 | | Electron 1.3.x/1.4.x | Tauri 1.5.0 |
 | --- | --- | --- |
-| What players get | 154 MB ZIP, 387 MB in 72 files unpacked (1.3.3 build) | one exe, **5.27 MB** |
+| What players get | 154 MB ZIP, 387 MB in 72 files unpacked (1.3.3 build) | one exe, **5.28 MB** (5,275,136 bytes) |
 | Window ready (Silvia, self-test) | not measured | **~0.35 s** (first check done by ~0.37-0.5 s) |
 | Runtime | bundled Chromium + Node | WebView2 (in Windows 10/11) |
 
