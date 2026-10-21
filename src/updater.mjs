@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { validatePackIndex, planPacks, rateMeter, DEFAULT_REQUEST_COST } from './packs.mjs';
 
 /** Launcher bookkeeping inside an installation; manifests may never write here. */
 export const STATE_DIRECTORY = '.slumsms-launcher';
@@ -164,12 +165,18 @@ function validateLayers(value) {
     const name = layerName(layer.name, `Layer ${index + 1} name`);
     if (names.has(name.toLowerCase())) throw new Error(`Duplicate layer name: ${name}.`);
     names.add(name.toLowerCase());
-    return Object.freeze({
+    const reference = {
       name,
       version: safeComponent(layer.version, `Layer ${name} version`),
       manifestUrl: relativeURL(layer.manifestUrl, `Layer ${name} manifestUrl`),
       sha256: hexDigest(layer.sha256, `layer ${name} manifest`),
-    });
+    };
+    // Optional packs for the first install (launcher 1.3.3+; older launchers ignore the field).
+    if (layer.packs !== undefined) {
+      if (!layer.packs || typeof layer.packs !== 'object') throw new Error(`Layer ${name} packs must be an object.`);
+      reference.packs = Object.freeze({ url: relativeURL(layer.packs.url, `Layer ${name} packs url`), sha256: hexDigest(layer.packs.sha256, `layer ${name} pack index`) });
+    }
+    return Object.freeze(reference);
   }));
 }
 
@@ -269,7 +276,7 @@ function accessDenied(status) {
   return error;
 }
 
-async function request(input, signal, access = null) {
+async function request(input, signal, access = null, extraHeaders = {}) {
   let url = networkURL(input);
   const secure = url.protocol === 'https:';
   // The key is sent only while the chain stays on the feed's origin. A redirect to any other origin
@@ -278,7 +285,7 @@ async function request(input, signal, access = null) {
   for (let redirects = 0; redirects <= 5; redirects += 1) {
     if (secure && url.protocol !== 'https:') throw permanent(new Error('An HTTPS release cannot redirect to HTTP.'));
     if (url.origin !== access?.origin) trusted = false;
-    const headers = { 'Accept-Encoding': 'identity' };
+    const headers = { 'Accept-Encoding': 'identity', ...extraHeaders };
     if (trusted) headers.Authorization = access.authorization;
     const response = await fetch(url, { redirect: 'manual', signal, headers });
     if ([301, 302, 303, 307, 308].includes(response.status)) {
@@ -546,6 +553,7 @@ export async function loadRelease(feedUrl, { installDir, accessKey = '' } = {}) 
   let files;
   const layers = [];
   const layerSources = [];
+  const layerParts = [];
   if (manifest.schemaVersion === 1) {
     files = manifest.files.map((file) => ({ ...file, url: new URL(file.url, top.finalUrl).href, layer: '' }));
   } else {
@@ -559,7 +567,10 @@ export async function loadRelease(feedUrl, { installDir, accessKey = '' } = {}) 
         if (sha256(source.bytes) !== reference.sha256) throw new Error(`Layer manifest ${reference.name}@${reference.version} failed SHA-256 verification.`);
       }
       const layer = validateLayerManifest(parseJSON(source.bytes, `layer manifest ${reference.name}`), reference);
-      parts.push({ name: layer.layer, files: layer.files.map((file) => ({ ...file, url: new URL(file.url, source.finalUrl).href })) });
+      const layerFiles = layer.files.map((file) => ({ ...file, url: new URL(file.url, source.finalUrl).href }));
+      parts.push({ name: layer.layer, files: layerFiles });
+      layerParts.push({ layer: layer.layer, version: layer.version, manifestSha256: reference.sha256, files: layerFiles,
+        packs: reference.packs ? { url: new URL(reference.packs.url, top.finalUrl).href, sha256: reference.packs.sha256 } : null });
       layers.push(Object.freeze({ name: reference.name, version: reference.version, sha256: reference.sha256, cached }));
       layerSources.push({ sha256: reference.sha256, requestUrl, finalUrl: source.finalUrl, bytes: source.bytes, cached });
     }
@@ -576,7 +587,7 @@ export async function loadRelease(feedUrl, { installDir, accessKey = '' } = {}) 
     layers: Object.freeze(layers),
     files: Object.freeze(files.map((file) => Object.freeze(file))),
   });
-  loaded.set(release, { layerSources, access });
+  loaded.set(release, { layerSources, layerParts, access });
   return release;
 }
 
@@ -755,24 +766,233 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
   signal.addEventListener('abort', abort, { once: true });
 });
 
-async function download(file, target, onBytes, signal, access) {
-  const { response } = await request(file.url, signal, access);
-  const hash = createHash('sha256');
-  let size = 0;
-  const verify = new Transform({
-    transform(chunk, encoding, callback) {
-      size += chunk.length;
-      if (size > file.size) return callback(permanent(new Error(`Download exceeds declared size: ${file.path}.`)));
-      hash.update(chunk);
-      try { onBytes(chunk.length); } catch (error) { callback(error); return; }
-      callback(null, chunk);
-    },
-  });
-  const body = response.body ? Readable.fromWeb(response.body) : Readable.from([]);
-  await pipeline(body, verify, createWriteStream(target, { flags: 'wx', mode: 0o600 }), { signal });
-  // A short body is usually a dropped connection and is retried; a full-size mismatch is not.
-  if (size < file.size) throw new Error(`Download ended early: ${file.path}.`);
-  if (hash.digest('hex') !== file.sha256) throw permanent(new Error(`Downloaded file failed size/SHA-256 verification: ${file.path}.`));
+/** Exponential backoff with jitter, capped so a long outage is retried about every 30 seconds. */
+const backoff = (base, attempt) => Math.min(base * 2 ** attempt, 30_000) + Math.random() * base;
+
+export const DEFAULT_STALL_MS = 60_000;
+export const DEFAULT_PACK_CONCURRENCY = 4;
+/** Below this many pending files the pack index is not even fetched: small updates stay per-file. */
+export const PACK_MIN_FILES = 32;
+const STALE_STAGE_MS = 60 * 60 * 1000;
+
+/**
+ * A per-request signal that also aborts when no data arrives for `stallMs`: a dead home connection
+ * can hang without ever erroring. touch() on every chunk; done() when the request is over.
+ */
+function stallGuard(parent, stallMs) {
+  const controller = new AbortController();
+  const abort = () => controller.abort(parent.reason);
+  if (parent.aborted) abort(); else parent.addEventListener('abort', abort, { once: true });
+  let timer;
+  const touch = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => controller.abort(Object.assign(new Error('The download stalled: no data for a while.'), { stalled: true })), stallMs);
+  };
+  touch();
+  return { signal: controller.signal, touch, done() { clearTimeout(timer); parent.removeEventListener('abort', abort); } };
+}
+
+async function download(file, target, onBytes, signal, access, stallMs = DEFAULT_STALL_MS) {
+  const guard = stallGuard(signal, stallMs);
+  try {
+    const { response } = await request(file.url, guard.signal, access);
+    const hash = createHash('sha256');
+    let size = 0;
+    const verify = new Transform({
+      transform(chunk, encoding, callback) {
+        guard.touch();
+        size += chunk.length;
+        if (size > file.size) return callback(permanent(new Error(`Download exceeds declared size: ${file.path}.`)));
+        hash.update(chunk);
+        try { onBytes(chunk.length); } catch (error) { callback(error); return; }
+        callback(null, chunk);
+      },
+    });
+    const body = response.body ? Readable.fromWeb(response.body) : Readable.from([]);
+    await pipeline(body, verify, createWriteStream(target, { flags: 'wx', mode: 0o600 }), { signal: guard.signal });
+    // A short body is usually a dropped connection and is retried; a full-size mismatch is not.
+    if (size < file.size) throw new Error(`Download ended early: ${file.path}.`);
+    if (hash.digest('hex') !== file.sha256) throw permanent(new Error(`Downloaded file failed size/SHA-256 verification: ${file.path}.`));
+  } finally { guard.done(); }
+}
+
+const LOCAL_ERRORS = new Set(['ENOSPC', 'EDQUOT', 'EACCES', 'EPERM', 'EROFS', 'EIO', 'EMFILE', 'ENFILE', 'EBUSY']);
+/** Disk errors are not network trouble: never retry them. */
+function local(error) {
+  if (LOCAL_ERRORS.has(error?.code)) error.local = true;
+  return error;
+}
+
+/** Free bytes for `directory` (or its nearest existing parent); null when the platform cannot say. */
+export async function freeDiskBytes(directory) {
+  let current = path.resolve(directory);
+  for (;;) {
+    try {
+      const stats = await fs.statfs(current);
+      return Number(stats.bavail) * Number(stats.bsize);
+    } catch (error) {
+      const parent = path.dirname(current);
+      if (error.code !== 'ENOENT' || parent === current) return null;
+      current = parent;
+    }
+  }
+}
+
+const gigabytes = (bytes) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+
+/** Refuse to start a download that cannot fit, instead of failing hours in with a full disk. */
+async function ensureDiskSpace(root, bytes, freeSpace) {
+  let free;
+  try { free = await freeSpace(root); } catch { free = null; }
+  if (free === null || !Number.isFinite(free)) return;
+  const needed = bytes + Math.min(bytes, 512 * 1024 * 1024);
+  if (free < needed) {
+    const error = permanent(new Error(`Not enough disk space: this download needs about ${gigabytes(needed)} free in ${root}, but only ${gigabytes(free)} is free. Free up space or choose another game folder in Settings.`));
+    error.code = 'DISK_FULL';
+    throw error;
+  }
+}
+
+/** Staging folders left by a launcher that was killed mid-install hold partial downloads; drop old ones. */
+async function removeStaleStages(root) {
+  let entries;
+  try { entries = await fs.readdir(root); } catch { return; }
+  for (const entry of entries) {
+    if (!entry.startsWith(STAGE_PREFIX)) continue;
+    const full = path.join(root, entry);
+    const stat = await statOrMissing(full).catch(() => null);
+    if (stat?.isDirectory() && Date.now() - stat.mtimeMs > STALE_STAGE_MS) await fs.rm(full, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/** Fetch and verify the pack indexes of a loaded release; a layer whose index is unusable just has no packs. */
+async function loadPackSources(layerParts, access, signal, note) {
+  const sources = [];
+  for (const part of layerParts) {
+    if (!part.packs) continue;
+    try {
+      const { bytes, finalUrl } = await readJSON(part.packs.url, `pack index ${part.layer}`, access, signal);
+      if (sha256(bytes) !== part.packs.sha256) throw new Error(`Pack index for ${part.layer}@${part.version} failed SHA-256 verification.`);
+      for (const pack of validatePackIndex(parseJSON(bytes, `pack index ${part.layer}`), part)) {
+        sources.push({ ...pack, url: networkURL(new URL(pack.url, finalUrl)).href });
+      }
+    } catch (error) {
+      if (error.code === 'ACCESS_KEY_REQUIRED' || signal.aborted) throw error;
+      note(`Packs for ${part.layer} are unavailable (${error.message}); downloading its files one by one.`);
+    }
+  }
+  return sources;
+}
+
+/** Where a range response's body starts within the pack. */
+function rangeStart(response, start, end, total) {
+  if (response.status === 206) {
+    const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/u.exec(response.headers.get('content-range') ?? '');
+    if (!match || Number(match[1]) !== start || Number(match[2]) > end - 1 || (match[3] !== '*' && Number(match[3]) !== total)) {
+      throw permanent(new Error('The pack server answered with an unexpected byte range.'));
+    }
+    return start;
+  }
+  if (response.status === 200) {
+    // A server without range support sends the whole pack; the bytes before `start` are skipped.
+    const length = response.headers.get('content-length');
+    if (length !== null && Number(length) !== total) throw permanent(new Error('A pack on the server does not match its index.'));
+    return 0;
+  }
+  throw permanent(new Error(`Unexpected pack response: HTTP ${response.status}.`));
+}
+
+/**
+ * Download one byte range of a pack and split it into files. Each file is hashed while it streams
+ * and handed to onFile(entry, temporary) only after its SHA-256 matches. A dropped or stalled
+ * connection resumes at the exact byte with an HTTP Range request (the partial file and its hash
+ * carry on); the retry budget refills whenever an attempt made progress.
+ */
+async function fetchSpan(pack, span, { stage, signal, access, onBytes, onFile, onRetry, retries, retryDelayMs, stallMs }) {
+  let pos = span.start;
+  let index = 0;
+  let current = null;
+  let attempt = 0;
+  const open = async (entry) => {
+    const temporary = path.join(stage, randomUUID());
+    try { current = { handle: await fs.open(temporary, 'wx', 0o600), hash: createHash('sha256'), temporary, entry }; } catch (error) { throw local(error); }
+  };
+  const finish = async () => {
+    const { handle, hash, temporary, entry } = current;
+    current = null;
+    try { await handle.close(); } catch (error) { await fs.rm(temporary, { force: true }); throw local(error); }
+    if (hash.digest('hex') !== entry.sha256) {
+      await fs.rm(temporary, { force: true });
+      throw permanent(new Error(`A file in pack ${pack.url} failed SHA-256 verification.`));
+    }
+    index += 1;
+    // Installing is local work (rename, copy, path checks): a failure there is never retried as network trouble.
+    try { await onFile(entry, temporary); } catch (error) { error.local = true; throw error; }
+  };
+  // Zero-byte files complete as soon as the position reaches them.
+  const settle = async () => {
+    while (index < span.entries.length && span.entries[index].size === 0 && span.entries[index].offset <= pos) {
+      await open(span.entries[index]);
+      await finish();
+    }
+  };
+  try {
+    for (;;) {
+      const before = pos;
+      const guard = stallGuard(signal, stallMs);
+      try {
+        await settle();
+        if (pos >= span.end) return;
+        const { response } = await request(pack.url, guard.signal, access, { Range: `bytes=${pos}-${span.end - 1}` });
+        let at = rangeStart(response, pos, span.end, pack.size);
+        const body = response.body ? Readable.fromWeb(response.body) : Readable.from([]);
+        try {
+          for await (const chunk of body) {
+            guard.touch();
+            let offset = at < pos ? Math.min(chunk.length, pos - at) : 0;
+            at += chunk.length;
+            while (offset < chunk.length && pos < span.end) {
+              const entry = span.entries[index];
+              if (pos < entry.offset) {
+                const skip = Math.min(entry.offset - pos, chunk.length - offset);
+                offset += skip;
+                pos += skip;
+                onBytes(skip);
+                continue;
+              }
+              if (!current) await open(entry);
+              const take = Math.min(entry.offset + entry.size - pos, chunk.length - offset);
+              const piece = chunk.subarray(offset, offset + take);
+              try { await current.handle.write(piece); } catch (error) { throw local(error); }
+              current.hash.update(piece);
+              offset += take;
+              pos += take;
+              onBytes(take);
+              if (pos === entry.offset + entry.size) {
+                await finish();
+                await settle();
+              }
+            }
+            if (pos >= span.end) break;
+          }
+        } finally { body.destroy(); }
+        if (pos < span.end) throw new Error(`Pack download ended early: ${pack.url}.`);
+        await settle();
+        return;
+      } catch (error) {
+        if (signal.aborted || error.permanent || error.local) throw error;
+        attempt = pos - before >= 1024 * 1024 ? 1 : attempt + 1;
+        if (attempt > retries) throw error;
+        onRetry(error);
+        await sleep(backoff(retryDelayMs, attempt - 1), signal);
+      } finally { guard.done(); }
+    }
+  } finally {
+    if (current) {
+      await current.handle.close().catch(() => {});
+      await fs.rm(current.temporary, { force: true });
+    }
+  }
 }
 
 /**
@@ -780,15 +1000,24 @@ async function download(file, target, onBytes, signal, access) {
  * Every download is verified in staging before it is moved into place. Files that did not exist are
  * committed as soon as they verify, so an interrupted first install resumes where it stopped; files
  * that replace existing ones are committed only after every download has verified.
+ *
+ * Big downloads (a first install) take whole packs or ranges of packs when the release publishes
+ * them and that is cheaper than one request per file; everything else, and anything a broken pack
+ * still owed, is downloaded per file. options: packs (default true), packConcurrency, packRetries,
+ * stallMs, freeSpace (a free-bytes function, for tests).
  */
 export async function installRelease(root, release, onProgress = () => {}, options = {}) {
   const { mode = 'fast', concurrency = DEFAULT_CONCURRENCY, retries = 4 } = options;
   const retryDelayMs = options.retryDelayMs ?? 500;
+  const packConcurrency = options.packConcurrency ?? DEFAULT_PACK_CONCURRENCY;
+  const packRetries = options.packRetries ?? 8;
+  const stallMs = options.stallMs ?? DEFAULT_STALL_MS;
   if (!loaded.has(release)) throw new Error('Load the release from its manifest URL before downloading files.');
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > MAX_CONCURRENCY) throw new Error(`Concurrency must be 1-${MAX_CONCURRENCY}.`);
-  const { access } = loaded.get(release);
+  if (!Number.isSafeInteger(packConcurrency) || packConcurrency < 1 || packConcurrency > MAX_CONCURRENCY) throw new Error(`Pack concurrency must be 1-${MAX_CONCURRENCY}.`);
+  const { access, layerParts = [] } = loaded.get(release);
   const pending = await inspect(root, release, onProgress, mode);
-  const result = { files: pending.files, bytes: pending.bytes, hashed: pending.hashed };
+  const result = { files: pending.files, bytes: pending.bytes, hashed: pending.hashed, packs: 0 };
   const installation = await installationRoot(root, true);
   const verified = pending.verified;
   const saveState = () => writeInstallState(installation.root, release, verified);
@@ -798,22 +1027,40 @@ export async function installRelease(root, release, onProgress = () => {}, optio
     await recordInstalled(installation.root, release).catch(() => {});
     return result;
   }
+  await ensureDiskSpace(installation.root, pending.bytes, options.freeSpace ?? freeDiskBytes);
+  await removeStaleStages(installation.root);
   const stage = await fs.mkdtemp(path.join(installation.root, STAGE_PREFIX));
   const cache = new Map();
   await installationRoot(installation.root, false, cache);
   const deferred = [];
   let bytesDone = 0;
+  let bytesTotal = pending.bytes;
   let filesDone = 0;
   let lastCheckpoint = Date.now();
   let checkpoint = Promise.resolve();
   let complete = false;
-  const progress = (message) => onProgress({ message, filesDone, filesTotal: pending.files.length, bytesDone, bytesTotal: pending.bytes });
+  const meter = rateMeter();
+  const progress = (message) => {
+    meter.add(bytesDone);
+    onProgress({ message, filesDone, filesTotal: pending.files.length, bytesDone, bytesTotal, ...meter.estimate(bytesTotal) });
+  };
   async function commit(file, temporary) {
     const target = await destination(installation.root, file.path, true, cache);
     await fs.rename(temporary, target.filename);
     cache.get(path.dirname(target.filename))?.set(windowsKey(path.basename(target.filename)), path.basename(target.filename));
     const stat = await fs.lstat(target.filename);
     verified.set(file.path, { size: stat.size, mtimeMs: stat.mtimeMs, sha256: file.sha256 });
+  }
+  /** Install one verified download (or defer it when it replaces an existing file). */
+  async function place(file, temporary) {
+    if (pending.existing.has(file.path)) deferred.push({ file, temporary });
+    else await commit(file, temporary);
+    filesDone += 1;
+    progress(`Verified ${file.path}`);
+    if (Date.now() - lastCheckpoint > STATE_CHECKPOINT_MS) {
+      lastCheckpoint = Date.now();
+      checkpoint = checkpoint.then(saveState, saveState);
+    }
   }
   const controller = new AbortController();
   // An optional caller signal (the launcher self-update's stall watchdog) cancels the whole install.
@@ -829,34 +1076,78 @@ export async function installRelease(root, release, onProgress = () => {}, optio
           received += count;
           bytesDone += count;
           progress(`Downloading ${file.path}`);
-        }, controller.signal, access);
+        }, controller.signal, access, stallMs);
         break;
       } catch (error) {
         bytesDone -= received;
         await fs.rm(temporary, { force: true });
         if (controller.signal.aborted || error.permanent || attempt >= retries) throw error;
         progress(`Retrying ${file.path}`);
-        await sleep(retryDelayMs * 2 ** attempt + Math.random() * retryDelayMs, controller.signal);
+        await sleep(backoff(retryDelayMs, attempt), controller.signal);
       }
     }
-    if (pending.existing.has(file.path)) deferred.push({ file, temporary });
-    else await commit(file, temporary);
-    filesDone += 1;
-    progress(`Verified ${file.path}`);
-    if (Date.now() - lastCheckpoint > STATE_CHECKPOINT_MS) {
-      lastCheckpoint = Date.now();
-      checkpoint = checkpoint.then(saveState, saveState);
-    }
+    await place(file, temporary);
   }
+  let failure;
+  const fail = (error) => { if (!failure) { failure = error; controller.abort(); } };
   try {
-    progress('Downloading verified update files…');
-    let failure;
-    await pool(pending.files.length, concurrency, async (index) => {
-      if (controller.signal.aborted) return;
-      try { await transfer(pending.files[index]); } catch (error) {
-        if (!failure) { failure = error; controller.abort(); }
-      }
-    });
+    let plan = { packs: [], files: pending.files, bytes: pending.bytes };
+    if (options.packs !== false && pending.files.length >= PACK_MIN_FILES && layerParts.some((part) => part.packs)) {
+      progress('Planning the download…');
+      const sources = await loadPackSources(layerParts, access, controller.signal, progress);
+      if (sources.length) plan = planPacks(pending.files, sources);
+    }
+    bytesTotal = plan.bytes;
+    result.packs = plan.packs.length;
+    const single = [...plan.files];
+    if (plan.packs.length) {
+      progress(`Downloading ${plan.packs.length} pack${plan.packs.length === 1 ? '' : 's'}…`);
+      await pool(plan.packs.length, packConcurrency, async (number) => {
+        if (controller.signal.aborted) return;
+        const { source, spans } = plan.packs[number];
+        const done = new Set();
+        let spanIndex = 0;
+        let spanReceived = 0;
+        const context = {
+          stage, signal: controller.signal, access, retries: packRetries, retryDelayMs, stallMs,
+          onBytes: (count) => { spanReceived += count; bytesDone += count; progress(`Downloading pack ${number + 1} of ${plan.packs.length}`); },
+          onRetry: () => progress(`Connection lost; resuming pack ${number + 1}…`),
+          onFile: async (entry, temporary) => {
+            const [first, ...copies] = entry.targets;
+            // Identical files share one copy in the pack.
+            for (const file of copies) {
+              const copy = path.join(stage, randomUUID());
+              try { await fs.copyFile(temporary, copy, constants.COPYFILE_EXCL); } catch (error) { throw local(error); }
+              await place(file, copy);
+            }
+            await place(first, temporary);
+            done.add(entry);
+          },
+        };
+        try {
+          for (; spanIndex < spans.length; spanIndex += 1) {
+            spanReceived = 0;
+            await fetchSpan(source, spans[spanIndex], context);
+          }
+        } catch (error) {
+          if (controller.signal.aborted || !error.permanent || error.code === 'ACCESS_KEY_REQUIRED') { fail(error); return; }
+          // A missing or damaged pack: download what it still owed one file at a time.
+          const owed = spans.slice(spanIndex).flatMap((span) => span.entries).filter((entry) => !done.has(entry)).flatMap((entry) => entry.targets);
+          const unread = spans.slice(spanIndex).reduce((sum, span) => sum + span.end - span.start, 0) - spanReceived;
+          bytesTotal += owed.reduce((sum, file) => sum + file.size, 0) - unread;
+          single.push(...owed);
+          progress(`A pack could not be used (${error.message}); downloading its files one by one.`);
+        }
+      });
+      if (failure) throw failure;
+    }
+    if (single.length) {
+      progress('Downloading verified update files…');
+      await pool(single.length, concurrency, async (index) => {
+        if (controller.signal.aborted) return;
+        try { await transfer(single[index]); } catch (error) { fail(error); }
+      });
+    }
     if (failure) throw failure;
     if (controller.signal.aborted) throw controller.signal.reason ?? new Error('Install cancelled.');
     // No existing file is replaced until every download has passed verification.

@@ -7,6 +7,7 @@ import { pipeline } from 'node:stream/promises';
 import { pathToFileURL } from 'node:url';
 import { validateManifest, validateLayerManifest, validateLauncherChannel, mergeLayers, layerName, safeComponent, launcherLayerName, LAUNCHER_CHANNEL_FILE, LAUNCHER_PLATFORMS } from '../src/updater.mjs';
 import { compareVersions } from '../src/self-update.mjs';
+import { validatePackIndex, groupPacks, DEFAULT_PACK_SIZE, PACK_INDEX_FILE } from '../src/packs.mjs';
 
 const encodeSegment = (segment) => encodeURIComponent(segment).replace(/[!'()*]/gu, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 export const DEFAULT_EXECUTABLE = 'SlumsMS.exe';
@@ -253,11 +254,105 @@ async function writeLayer({ approvedSource, sourceFiles, layerDirectory, layer, 
   }
 }
 
+const PACKS_DIRECTORY = 'packs';
+const packsUrl = (name, version) => `layers/${encodeSegment(name)}/${encodeSegment(version)}/${PACKS_DIRECTORY}/${PACK_INDEX_FILE}`;
+
+async function readRegularFile(filename, label) {
+  const stat = await statOrMissing(filename);
+  if (!stat || !stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} is missing or not a regular file.`);
+  return fs.readFile(filename);
+}
+
+/** Append published files to one pack, checking each against the layer manifest; returns the pack's size and SHA-256. */
+async function writePack(target, files, filesDirectory) {
+  const packHash = createHash('sha256');
+  let packSize = 0;
+  const output = await fs.open(target, 'wx');
+  try {
+    for (const file of files) {
+      if (file.url !== `files/${encodePath(file.path)}`) throw new Error(`Packs need a layer written by --layer; unexpected url for ${file.path}.`);
+      const source = path.join(filesDirectory, ...file.path.split('/'));
+      await directoryWithoutSymlinks(path.dirname(source));
+      const input = await fs.open(source, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      try {
+        if (!(await input.stat()).isFile()) throw new Error(`Not a regular file: ${source}`);
+        const hash = createHash('sha256');
+        let size = 0;
+        for await (const chunk of input.createReadStream({ autoClose: false, highWaterMark: 1024 * 1024 })) {
+          size += chunk.length;
+          if (size > file.size) break;
+          hash.update(chunk);
+          packHash.update(chunk);
+          await output.write(chunk);
+        }
+        if (size !== file.size || hash.digest('hex') !== file.sha256) throw new Error(`Published file does not match the layer manifest (damaged?): ${file.path}`);
+        packSize += size;
+      } finally { await input.close(); }
+    }
+    await output.sync();
+  } finally { await output.close(); }
+  return { size: packSize, sha256: packHash.digest('hex') };
+}
+
+/**
+ * Build first-install packs for an already published layer version:
+ * OUTPUT/layers/NAME/VERSION/packs/{0001.pack, ..., index.json}. Packs are built from the published
+ * files (each re-verified against the layer manifest), so the same layer always yields the same
+ * bytes. The layer's files and manifest are not touched and packs/ is immutable once written; the
+ * next --release references it automatically.
+ */
+export async function publishPacks({ output, layer, version, packSize = DEFAULT_PACK_SIZE, onPack = () => {} } = {}) {
+  layerName(layer, 'Layer name');
+  safeComponent(version, 'Layer version');
+  if (typeof output !== 'string' || !output.trim()) throw new Error('An output directory is required.');
+  const destination = path.resolve(output);
+  return withLock(destination, async () => {
+    const versionDirectory = path.join(destination, 'layers', layer, version);
+    if (!(await directoryWithoutSymlinks(versionDirectory)).exists) throw new Error(`Layer ${layer}@${version} has not been published to ${destination}.`);
+    const body = await readRegularFile(path.join(versionDirectory, 'manifest.json'), `Layer ${layer}@${version} manifest.json`);
+    const manifest = validateLayerManifest(JSON.parse(body.toString('utf8')), { name: layer, version });
+    await assertNoAlias(versionDirectory, PACKS_DIRECTORY, `Packs for ${layer}@${version}`);
+    const groups = groupPacks(manifest.files, packSize);
+    const temporary = await fs.mkdtemp(path.join(versionDirectory, '.mapleroot-packs-'));
+    try {
+      const packs = [];
+      for (let number = 0; number < groups.length; number += 1) {
+        const url = `${String(number + 1).padStart(4, '0')}.pack`;
+        const written = await writePack(path.join(temporary, url), groups[number].map((index) => manifest.files[index]), path.join(versionDirectory, 'files'));
+        packs.push({ url, size: written.size, sha256: written.sha256, files: groups[number] });
+        onPack({ number: number + 1, total: groups.length, url, size: written.size });
+      }
+      const index = { schemaVersion: 1, layer, version, manifestSha256: digestBytes(body), packs };
+      validatePackIndex(index, { ...manifest, manifestSha256: index.manifestSha256 });
+      const indexBody = `${JSON.stringify(index)}\n`;
+      await fs.writeFile(path.join(temporary, PACK_INDEX_FILE), indexBody, { flag: 'wx' });
+      // A directory rename onto a new name is atomic: packs/ appears complete or not at all.
+      await fs.rename(temporary, path.join(versionDirectory, PACKS_DIRECTORY));
+      return {
+        url: packsUrl(layer, version), sha256: digestBytes(indexBody), packs: packs.length,
+        bytes: packs.reduce((sum, pack) => sum + pack.size, 0), files: manifest.files.length,
+        packedFiles: packs.reduce((sum, pack) => sum + pack.files.length, 0),
+      };
+    } finally { await fs.rm(temporary, { recursive: true, force: true }); }
+  });
+}
+
+/** The packs reference for a published layer version, or undefined when it has none. */
+async function packsReference(versionDirectory, name, version, manifest, manifestSha256) {
+  const indexFile = path.join(versionDirectory, PACKS_DIRECTORY, PACK_INDEX_FILE);
+  if (!await statOrMissing(indexFile)) return undefined;
+  if (!(await directoryWithoutSymlinks(path.dirname(indexFile))).exists) return undefined;
+  const body = await readRegularFile(indexFile, `Pack index of ${name}@${version}`);
+  validatePackIndex(JSON.parse(body.toString('utf8')), { ...manifest, manifestSha256 });
+  return { url: packsUrl(name, version), sha256: digestBytes(body) };
+}
+
 /**
  * Write OUTPUT/manifest.json (schemaVersion 2) referencing already published layer versions, in
- * override order (later layers win). Nothing else is changed; publish layers first.
+ * override order (later layers win), with each layer's packs when it has them (packs: false skips).
+ * Nothing else is changed; publish layers (and packs) first.
  */
-export async function publishLayeredRelease({ output, version, executable = DEFAULT_EXECUTABLE, args = [], news, playerOwned = DEFAULT_PLAYER_OWNED, layers } = {}) {
+export async function publishLayeredRelease({ output, version, executable = DEFAULT_EXECUTABLE, args = [], news, playerOwned = DEFAULT_PLAYER_OWNED, layers, packs = true } = {}) {
   if (typeof output !== 'string' || !output.trim()) throw new Error('An output directory is required.');
   if (!Array.isArray(layers) || !layers.length) throw new Error('Name at least one published layer (NAME@VERSION).');
   const destination = path.resolve(output);
@@ -274,7 +369,11 @@ export async function publishLayeredRelease({ output, version, executable = DEFA
       if (!stat || !stat.isFile() || stat.isSymbolicLink()) throw new Error(`Layer ${name}@${layerVersion} has no regular manifest.json (incomplete publication?).`);
       const body = await fs.readFile(manifestFile);
       const manifest = validateLayerManifest(JSON.parse(body.toString('utf8')), { name, version: layerVersion });
-      references.push({ name, version: layerVersion, manifestUrl: layerManifestUrl(name, layerVersion), sha256: digestBytes(body) });
+      const reference = { name, version: layerVersion, manifestUrl: layerManifestUrl(name, layerVersion), sha256: digestBytes(body) };
+      // Layers with published packs are referenced with them, so new launchers can use them for a first install.
+      const packRef = packs ? await packsReference(versionDirectory, name, layerVersion, manifest, reference.sha256) : undefined;
+      if (packRef) reference.packs = packRef;
+      references.push(reference);
       parts.push({ name, files: manifest.files });
     }
     const merged = mergeLayers(parts);
@@ -372,9 +471,11 @@ export async function publishLauncher({ source, output, platform = 'win32-x64', 
 const usage = `Usage:
   Publish a layer (immutable OUT/layers/NAME/VERSION/):
     node tools/publish.mjs --layer NAME --source DIR --out DIR --version VERSION
+  Build first-install packs for a published layer (immutable OUT/layers/NAME/VERSION/packs/):
+    node tools/publish.mjs --packs NAME@VERSION --out DIR [--pack-size MIB]
   Point the release at published layers (writes OUT/manifest.json last; later layers override earlier):
     node tools/publish.mjs --release VERSION --out DIR --use base@BASE_VERSION --use client@CLIENT_VERSION
-      [--exe SlumsMS.exe] [--arg VALUE ...] [--news FILE.json] [--player-owned PATH ...] [--no-player-owned]
+      [--exe SlumsMS.exe] [--arg VALUE ...] [--news FILE.json] [--player-owned PATH ...] [--no-player-owned] [--no-packs]
   Publish a launcher build to the launcher channel (OUT/launcher/PLATFORM/VERSION/, then OUT/launcher.json):
     node tools/publish.mjs --launcher dist/win-unpacked --out DIR [--platform win32-x64] [--version X.Y.Z] [--allow-no-access-key]
   Legacy single-folder release (schemaVersion 1):
@@ -384,14 +485,16 @@ async function cli(argv) {
   if (argv.length === 1 && ['--help', '-h'].includes(argv[0])) { console.log(usage); return; }
   const options = { args: [], use: [], playerOwned: [] };
   const names = new Map([['--source', 'source'], ['--out', 'output'], ['--version', 'version'], ['--exe', 'executable'], ['--news', 'news'],
-    ['--layer', 'layer'], ['--release', 'release'], ['--launcher', 'launcher'], ['--platform', 'platform']]);
+    ['--layer', 'layer'], ['--release', 'release'], ['--launcher', 'launcher'], ['--platform', 'platform'], ['--packs', 'packs'], ['--pack-size', 'packSize']]);
   const repeated = new Map([['--arg', 'args'], ['--use', 'use'], ['--player-owned', 'playerOwned']]);
   let noPlayerOwned = false;
   let allowNoAccessKey = false;
+  let noPacks = false;
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === '--no-player-owned') { noPlayerOwned = true; continue; }
     if (flag === '--allow-no-access-key') { allowNoAccessKey = true; continue; }
+    if (flag === '--no-packs') { noPacks = true; continue; }
     const key = names.get(flag) ?? repeated.get(flag);
     if (!key) throw new Error(`Unknown option: ${flag}\n${usage}`);
     if (index + 1 >= argv.length) throw new Error(`Missing value for ${flag}\n${usage}`);
@@ -421,6 +524,28 @@ async function cli(argv) {
     return;
   }
   if (Object.hasOwn(options, 'platform') || allowNoAccessKey) throw new Error('--platform/--allow-no-access-key require --launcher.');
+  if (Object.hasOwn(options, 'packs')) {
+    require('output');
+    if (Object.keys(options).some((key) => !['packs', 'packSize', 'output', 'args', 'use', 'playerOwned'].includes(key)) || options.args.length || options.use.length || options.playerOwned.length) {
+      throw new Error('--packs takes only --out and --pack-size.');
+    }
+    const at = options.packs.indexOf('@');
+    if (at < 1 || at === options.packs.length - 1) throw new Error(`--packs expects NAME@VERSION, got ${options.packs}`);
+    let packSize;
+    if (Object.hasOwn(options, 'packSize')) {
+      const mib = Number(options.packSize);
+      if (!Number.isSafeInteger(mib) || mib < 1 || mib > 4096) throw new Error('--pack-size is in MiB, 1-4096.');
+      packSize = mib * 1024 * 1024;
+    }
+    const started = Date.now();
+    const result = await publishPacks({ output: options.output, layer: options.packs.slice(0, at), version: options.packs.slice(at + 1), packSize,
+      onPack: ({ number, total, url, size }) => console.log(`  ${url} (${number}/${total}): ${(size / 1024 ** 2).toFixed(1)} MiB`) });
+    console.log(`Published ${result.packs} packs for ${options.packs}: ${result.packedFiles} unique of ${result.files} files, ${(result.bytes / 1024 ** 3).toFixed(2)} GiB in ${Math.round((Date.now() - started) / 1000)} s`);
+    console.log(`Pack index: ${result.url} SHA-256 ${result.sha256} (referenced by the next --release)`);
+    return;
+  }
+  if (Object.hasOwn(options, 'packSize')) throw new Error('--pack-size requires --packs.');
+  if (noPacks && !Object.hasOwn(options, 'release')) throw new Error('--no-packs requires --release.');
   if (Object.hasOwn(options, 'layer')) {
     require('source', 'output', 'version');
     if (Object.hasOwn(options, 'release') || options.use.length || options.args.length || options.executable || options.news || options.playerOwned.length) {
@@ -441,8 +566,8 @@ async function cli(argv) {
     });
     const playerOwned = noPlayerOwned ? [] : options.playerOwned.length ? options.playerOwned : DEFAULT_PLAYER_OWNED;
     const manifest = await publishLayeredRelease({ output: options.output, version: options.release, executable: options.executable, args: options.args,
-      news: options.news, playerOwned, layers });
-    console.log(`Published release ${manifest.version}: ${manifest.layers.map((layer) => `${layer.name}@${layer.version}`).join(' + ')} -> ${path.join(path.resolve(options.output), 'manifest.json')}`);
+      news: options.news, playerOwned, layers, packs: !noPacks });
+    console.log(`Published release ${manifest.version}: ${manifest.layers.map((layer) => `${layer.name}@${layer.version}${layer.packs ? ' (packs)' : ''}`).join(' + ')} -> ${path.join(path.resolve(options.output), 'manifest.json')}`);
     return;
   }
   require('source', 'output', 'version');

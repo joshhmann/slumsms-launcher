@@ -67,7 +67,7 @@ async function exists(file) {
 async function operation(phase, action) {
   if (busy) throw new Error('A launcher operation is already running.');
   busy = true;
-  send({ phase, canPlay: false, accessKeyNeeded: false, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0 });
+  send({ phase, canPlay: false, accessKeyNeeded: false, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0, bytesPerSecond: null, etaSeconds: null });
   try { return await action(); }
   catch (error) {
     const denied = error.code === 'ACCESS_KEY_REQUIRED';
@@ -83,7 +83,8 @@ function progress(value) {
   const now = Date.now();
   if (now - lastProgress < 100 && value.filesDone !== value.filesTotal) return;
   lastProgress = now;
-  send({ message: value.message, filesDone: value.filesDone, filesTotal: value.filesTotal, bytesDone: value.bytesDone, bytesTotal: value.bytesTotal });
+  send({ message: value.message, filesDone: value.filesDone, filesTotal: value.filesTotal, bytesDone: value.bytesDone, bytesTotal: value.bytesTotal,
+    bytesPerSecond: value.bytesPerSecond ?? null, etaSeconds: value.etaSeconds ?? null });
 }
 // mode 'fast' trusts files whose size and mtime match the install state; 'full' (Repair) hashes everything.
 async function checkRelease(mode = 'fast') {

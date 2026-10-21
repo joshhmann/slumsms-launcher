@@ -51,3 +51,12 @@ export function versionFooter(appVersion, installed, available) {
   return [appVersion && `Launcher ${appVersion}`, `Game installed ${status.installedLabel} / available ${status.availableLabel}`]
     .filter(Boolean).join(' · ');
 }
+
+/** Download time left, rounded the way people read it ("about 1 h 5 min left"). */
+export function formatTimeLeft(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '';
+  if (seconds < 60) return 'less than a minute left';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `about ${minutes} min left`;
+  return `about ${Math.floor(minutes / 60)} h ${minutes % 60} min left`;
+}

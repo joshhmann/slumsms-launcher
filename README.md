@@ -49,6 +49,9 @@ node tools/publish.mjs --layer base --source /srv/stage/base --out /srv/release 
 # (b) client layer, for each release
 node tools/publish.mjs --layer client --source /srv/stage/client --out /srv/release --version 2026.10.19-1
 
+# (c) optional, recommended for the base layer: first-install packs (see Packs below)
+node tools/publish.mjs --packs base@v83-2026.10.19 --out /srv/release
+
 # point players at it (writes manifest.json last; later --use overrides earlier)
 node tools/publish.mjs --release 2026.10.19-1 --out /srv/release \
   --use base@v83-2026.10.19 --use client@2026.10.19-1 [--news news.json]
@@ -65,12 +68,25 @@ release-output/
     base/v83-2026.10.19/
       manifest.json                     <- layer manifest (its SHA-256 is pinned in the top manifest)
       files/Data/Mob/0100100.img ...
+      packs/0001.pack ... index.json    <- optional first-install packs (index SHA-256 pinned in the top manifest)
     client/2026.10.19-1/
       manifest.json
       files/SlumsMS.exe, slums.dll, Data/Custom.wz, config.ini ...
 ```
 
 Upload new layer version folders completely, then upload/replace `manifest.json` last. Layer version folders are immutable: never edit one in place, publish a new version instead. Serve `manifest.json` with revalidation/no-cache and `layers/` with long-lived caching. Any static HTTPS host/CDN/object store works; the launcher resolves layer manifests relative to the final (post-redirect) top manifest URL, and layer files relative to their layer manifest.
+
+### Packs (first install)
+
+A first install of the base layer is ~86k files. `--packs NAME@VERSION` concatenates an already published layer version into ~256 MiB packs (`--pack-size MIB` to change), written to `layers/NAME/VERSION/packs/` beside `files/`:
+
+- Packs are built from the published `files/`, re-hashing each against the layer manifest, so a damaged publish is caught. The layer's `files/` and `manifest.json` are not touched; old launchers keep using them.
+- Deterministic: manifest order, each distinct content once (duplicates are copied on install), no headers, no compression (the Data IMGs compress only 2-5%). The same layer always gives the same bytes and the same index SHA-256.
+- `packs/` is immutable (written to a temp folder and renamed in one step; a second `--packs` for the same version is refused). It is served with the same long-lived caching as `files/`.
+- The next `--release` adds `packs: { url, sha256 }` to that layer's reference automatically (`--no-packs` leaves them out). Launchers before 1.3.3 ignore the field.
+- Disk: packs roughly double that layer's footprint on the server (base: +23.3 GB).
+
+`packs/index.json` is `{ schemaVersion: 1, layer, version, manifestSha256, packs: [{ url, size, sha256, files: [index into the layer manifest's files] }] }`; a pack is those files' bytes back to back, so each file's offset is the sum of the sizes before it.
 
 ### Legacy single-folder releases
 
@@ -168,11 +184,20 @@ Player-owned files (the release's `playerOwned` list; `config.ini` by default) a
 
 ## Downloads
 
-Installs use per-file downloads (default 12 in parallel). Transient failures (network errors, short bodies, HTTP 408/425/429/5xx) are retried up to 4 times with exponential backoff and jitter; a 4xx or a full-size SHA-256 mismatch fails immediately. Progress is reported as overall bytes and file counts, throttled to about 10 updates a second; the file list itself never crosses into the page.
+Before downloading anything the launcher checks free disk space (the pending bytes plus a margin of up to 512 MB) and stops with "Not enough disk space ..." instead of failing hours in.
 
-Each file is downloaded into `.mapleroot-stage-*`, size- and SHA-256-verified, then moved into place. Files that did not exist yet are moved in as soon as they verify and recorded in the state (checkpointed every 15 s and on failure), so an interrupted first install resumes where it left off without re-downloading or re-hashing finished files. Files that replace existing ones are moved in only after every download in that run has verified. An interrupted single file restarts from zero (no HTTP range resume).
+**Packs (first install and other big downloads).** When the release publishes packs and at least 32 files are pending, the launcher fetches the layers' pack indexes (pinned by SHA-256 in the top manifest) and plans the download: a pack, or byte ranges of it, is used only when it is cheaper than one request per file (each request counts as 128 KiB). A first install therefore takes whole packs; a small update or a repair of a few files stays per-file. Content is matched by SHA-256 and size, so a base file shadowed by an identical client file is taken once from whichever pack offers it. Up to 4 packs download in parallel. Each pack is streamed straight into the individual files, each file is SHA-256-verified against the layer manifest before it is moved into place, and the pack itself is never stored, so no extra disk space is needed.
 
-Chunked archives were considered and not implemented: the Data .img files barely compress (~97% under xz), so archives would save little bandwidth while costing resumability, extra disk space and a second verification path. Per-file downloads are correct on their own.
+- A dropped or stalled connection (no data for 60 s) resumes the pack **at the exact byte** with an HTTP `Range` request, continuing the partial file and its hash. The retry budget (8 attempts, backoff capped at 30 s) refills whenever an attempt made progress, so a flaky home connection keeps going.
+- A pack that is missing, damaged (a file fails its SHA-256) or served with a wrong range is abandoned, and what it still owed is downloaded per file. A server without range support still works (it sends whole packs; skipped bytes are discarded).
+- Closing the launcher keeps every file that finished; the next Install continues with what is left (a file that was half downloaded starts again).
+- Progress shows bytes, files, speed and time left (measured over the last 20 s).
+
+**Per-file** downloads (default 12 in parallel) handle everything else. Transient failures (network errors, stalls, short bodies, HTTP 408/425/429/5xx) are retried up to 4 times with exponential backoff and jitter; a 4xx or a full-size SHA-256 mismatch fails immediately. Progress is throttled to about 10 updates a second; the file list itself never crosses into the page.
+
+Each file is downloaded into `.mapleroot-stage-*`, size- and SHA-256-verified, then moved into place. Files that did not exist yet are moved in as soon as they verify and recorded in the state (checkpointed every 15 s and on failure), so an interrupted first install resumes where it left off without re-downloading or re-hashing finished files. Files that replace existing ones are moved in only after every download in that run has verified. An interrupted per-file download restarts that file from zero. Staging folders older than an hour (left by a launcher that was killed) are removed at the next install.
+
+Packs are not compressed: the Data .img files barely compress (~97% under xz), so compression would cost CPU on both ends for ~3-5%.
 
 ## Release news
 
@@ -191,7 +216,7 @@ At most 10 entries. `title` (up to 120 characters, one line) is required; `date`
 
 The publisher generates these fields; do not hand-edit them.
 
-- **schemaVersion 2 (top level):** `{ schemaVersion: 2, version, launch: { executable, args }, news?, playerOwned?: [path], layers: [{ name, version, manifestUrl, sha256 }] }`. `sha256` is the hash of the layer manifest's exact bytes; the launcher refuses a layer manifest that does not match. Layer names are letters/digits/`-`/`_`; versions are single safe path components.
+- **schemaVersion 2 (top level):** `{ schemaVersion: 2, version, launch: { executable, args }, news?, playerOwned?: [path], layers: [{ name, version, manifestUrl, sha256, packs?: { url, sha256 } }] }`. `sha256` is the hash of the layer manifest's exact bytes; the launcher refuses a layer manifest that does not match. Layer names are letters/digits/`-`/`_`; versions are single safe path components.
 - **Layer manifest:** `{ schemaVersion: 2, layer, version, files: [{ path, size, sha256, url }] }`, `layer`/`version` must match the reference. File URLs are relative to the layer manifest.
 - **schemaVersion 1 (legacy):** `{ schemaVersion: 1, version, launch, files, news?, playerOwned? }` with file URLs relative to the manifest.
 
@@ -213,6 +238,7 @@ The feed is trusted executable-distribution authority. SHA-256 verifies against 
 ## Verification exercised
 
 - Layered-release unit/HTTP tests (`test/layers.test.mjs`): publisher layer/top-level output and immutability; layer override order; only changed layers fetched (unchanged base layer manifest and files not requested); fast verify for unchanged, size change, mtime change, same-size tamper, missing, and the same-size-same-mtime limit caught only by Repair; player-owned config.ini; schemaVersion 1 compatibility; path traversal/reserved-path rejection in manifests, layer manifests and a hosted layer; retry/backoff, byte progress, permanent 404 and resumed install.
+- Pack tests (`test/packs.test.mjs`): deterministic, deduplicated, immutable pack publishing that re-verifies published files; `--release` references packs and `--no-packs` omits them; index validation (layer/manifest binding, sizes, repeated indexes, unsafe URLs); the planner (whole packs for a first install, per-file for a small update, ranges that skip big gaps, shadowed content fetched once); a first install from packs with duplicates and empty files; a connection cut mid-pack resuming at the exact byte; a stalled pack resumed after the stall timeout; a server without range support; a damaged and a missing pack falling back to per-file; an aborted first install resuming without re-downloading; the disk-space refusal; speed/ETA estimates.
 - Scale smoke (not in the suite): 30k-file layer on Linux, fast verify of an unchanged install ~1.2 s vs ~3.8 s full hash of tiny files; state file ~4 MB.
 - Five passing real-HTTP regression scenarios: fresh nested install/unchanged scan/repair with player-file preservation; corrupt payload preventing partial replacement; immutable publication/symlinks/Windows path aliases; redirected feed resolution; optional release news round-trip and rejection. The redirect regression was observed failing before its fix and passing afterward.
 - Access key HTTP tests (`test/access-key.test.mjs`): Basic header on manifest, layer manifests and files; no header with an empty key; header dropped on a cross-origin redirect and not re-attached when the chain bounces back; 401 gives the access-key error with exactly one request (load and mid-install); saved key overrides the built-in one, built-in key only for the built-in feed; config validation.

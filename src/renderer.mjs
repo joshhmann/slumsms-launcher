@@ -1,4 +1,4 @@
-import { versionStatus, versionFooter } from './version-status.mjs';
+import { versionStatus, versionFooter, formatTimeLeft } from './version-status.mjs';
 
 const elements = Object.fromEntries([
   'phase-badge', 'phase-label', 'status-eyebrow', 'status-heading', 'status-message',
@@ -98,6 +98,10 @@ function renderProgress() {
   }
   if (isCount(state.bytesDone) && isCount(state.bytesTotal)) {
     details.push(`${formatBytes(state.bytesDone)} / ${formatBytes(state.bytesTotal)}`);
+  }
+  if (state.phase !== 'checking' && isCount(state.bytesPerSecond) && state.bytesPerSecond > 0) {
+    details.push(`${formatBytes(state.bytesPerSecond)}/s`);
+    if (isCount(state.etaSeconds)) details.push(formatTimeLeft(state.etaSeconds));
   }
   elements['progress-detail'].textContent = details.join(' · ');
   const progress = elements['operation-progress'];
