@@ -1,6 +1,6 @@
 {
   "name": "mapleroot-launcher",
-  "version": "1.3.0",
+  "version": "1.3.2",
   "private": true,
   "description": "SlumsMS Windows launcher and static client release publisher",
   "type": "module",

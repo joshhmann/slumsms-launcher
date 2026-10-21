@@ -41,7 +41,11 @@
             <p class="status-message" id="status-message" role="status" aria-live="polite" aria-atomic="true">Loading launcher settings…</p>
             <p class="install-target" id="install-target" hidden>Installing to <span class="install-target-path" id="install-target-path"></span> <button class="link-button" id="change-folder-inline" type="button">Change</button></p>
           </div>
-          <div class="release-detail"><span class="detail-label">RELEASE</span><span id="release-version">Not checked</span></div>
+          <div class="release-detail" id="release-detail" data-kind="checking">
+            <div class="release-row"><span class="detail-label">INSTALLED</span><span class="release-value" id="installed-version">Unknown</span></div>
+            <div class="release-row"><span class="detail-label">AVAILABLE</span><span class="release-value" id="available-version">Checking…</span></div>
+            <span class="release-note" id="release-note" hidden></span>
+          </div>
         </section>
 
         <section class="action-bar" aria-label="Client actions">

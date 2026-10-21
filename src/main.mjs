@@ -3,7 +3,7 @@ import { readFile, writeFile, appendFile, mkdir, rename, stat } from 'node:fs/pr
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
-import { loadRelease, inspectRelease, installRelease, loadLauncherChannel } from './updater.mjs';
+import { loadRelease, inspectRelease, installRelease, loadLauncherChannel, readInstalledRecord, checkAvailableRelease } from './updater.mjs';
 import { launcherUpdateDecision, prepareLauncherUpdate, startLauncherSwap, cleanupLauncherUpdates, healthyMarker } from './self-update.mjs';
 import { readLauncherConfig, detectBundledClient, standaloneInstallDir, validateFeedUrl, validAccessKey, effectiveAccessKey } from './launcher-config.mjs';
 
@@ -16,7 +16,8 @@ let settings = { feedUrl: '', installDir: '', accessKey: '' };
 let config = { feedUrl: '', clientExecutable: '', downloadConcurrency: 12, accessKey: '' };
 let bundledDir = '';
 let busy = false;
-let state = { phase: 'idle', message: 'Checking for updates…', canPlay: false };
+let state = { phase: 'idle', message: 'Checking for updates…', canPlay: false, installed: { status: 'unknown' }, available: { status: 'checking' } };
+const AVAILABLE_INTERVAL_MS = 10 * 60_000;
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
 const logFile = () => path.join(app.getPath('userData'), 'launcher.log');
 const argument = flag => process.argv.find(value => value.startsWith(flag))?.slice(flag.length);
@@ -68,7 +69,11 @@ async function operation(phase, action) {
   busy = true;
   send({ phase, canPlay: false, accessKeyNeeded: false, filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0 });
   try { return await action(); }
-  catch (error) { send({ phase: 'error', message: error.message, accessKeyNeeded: error.code === 'ACCESS_KEY_REQUIRED', canPlay: false }); throw error; }
+  catch (error) {
+    const denied = error.code === 'ACCESS_KEY_REQUIRED';
+    send({ phase: 'error', message: error.message, accessKeyNeeded: denied, canPlay: false, ...(denied ? { available: { status: 'access-key' } } : {}) });
+    throw error;
+  }
   finally { busy = false; }
 }
 // Progress arrives per downloaded chunk; forward at most ~10 updates a second to the page.
@@ -84,13 +89,42 @@ function progress(value) {
 async function checkRelease(mode = 'fast') {
   const { feedUrl, installDir } = requireSettings();
   const release = await loadRelease(feedUrl, { installDir, accessKey: accessKey() });
-  send({ version: release.version, news: release.news ?? [], message: 'Verifying installed client files.' });
+  send({ version: release.version, news: release.news ?? [], available: availableFrom(release), message: 'Verifying installed client files.' });
   const fresh = !(await exists(path.resolve(installDir, ...release.launch.executable.split('/'))));
   const pending = await inspectRelease(installDir, release, progress, { mode });
+  await refreshInstalled();
   send({ phase: pending.files.length ? 'needs-update' : 'ready', canPlay: !pending.files.length, fresh: fresh && pending.files.length > 0,
     pendingFiles: pending.files.length, pendingBytes: pending.bytes,
     message: pending.files.length ? `${pending.files.length} files need installing or repair.` : 'All release files verified. Ready to play.' });
   return { release, pending };
+}
+// Installed: what this game folder last fully verified as (.slumsms-launcher/installed.json, written by
+// the updater). Available: the server's top-level manifest only; never layer manifests or files.
+const availableFrom = release => ({ status: 'ok', version: release.version, layers: release.layers.map(({ name, version }) => ({ name, version })) });
+async function refreshInstalled() {
+  const { installDir } = effective();
+  let installed = { status: 'not-installed' };
+  if (installDir) {
+    const record = await readInstalledRecord(installDir);
+    if (record) installed = { status: 'installed', version: record.release, layers: record.layers.map(({ name, version }) => ({ name, version })) };
+    else if (await exists(path.join(installDir, config.clientExecutable || 'SlumsMS.exe'))) installed = { status: 'unknown' };
+  }
+  send({ installed });
+}
+let availableRequest = 0;
+async function refreshAvailable({ reset = false } = {}) {
+  const { feedUrl } = effective();
+  const request = ++availableRequest;
+  // A periodic re-check keeps showing the last answer; a changed server or key starts over.
+  if (reset || state.available?.status !== 'ok') send({ available: { status: 'checking' } });
+  if (!feedUrl) { send({ available: { status: 'error' } }); return; }
+  const result = await checkAvailableRelease(feedUrl, { accessKey: accessKey() });
+  if (request !== availableRequest) return; // the server or key changed meanwhile
+  if (result.status !== 'ok') await log(`Version check: ${result.status}: ${result.message}`);
+  send({ available: result.status === 'ok' ? { status: 'ok', version: result.version, layers: result.layers } : { status: result.status } });
+}
+function refreshVersions(options) {
+  return Promise.all([refreshInstalled(), refreshAvailable(options)]).catch(error => log(`Version check failed: ${error.message}`));
 }
 function runProcess(command, args, options, waitForExit = false) {
   return new Promise((resolve, reject) => {
@@ -206,12 +240,14 @@ else {
       const href = validateFeedUrl(value);
       settings.feedUrl = href === config.feedUrl ? '' : href; await persist();
       send({ phase: 'idle', message: 'Update server saved.', canPlay: false, version: undefined, news: [] });
+      void refreshVersions({ reset: true });
       return effective();
     });
     handle('resetFeed', async () => {
       if (busy) throw new Error('Wait for the current operation to finish.');
       settings.feedUrl = ''; await persist();
       send({ phase: 'idle', message: 'Update server reset to the default.', canPlay: false, version: undefined, news: [] });
+      void refreshVersions({ reset: true });
       return effective();
     });
     const saveKey = async (value, message) => {
@@ -219,6 +255,7 @@ else {
       if (!validAccessKey(value)) throw new Error('The access key cannot contain control characters or exceed 256 characters.');
       settings.accessKey = value; await persist();
       send({ phase: 'idle', message, canPlay: false, version: undefined, news: [] });
+      void refreshVersions({ reset: true });
       return effective();
     };
     handle('saveAccessKey', value => {
@@ -232,6 +269,7 @@ else {
       if (!result.canceled) {
         settings.installDir = result.filePaths[0]; await persist();
         send({ phase: 'idle', message: 'Game folder saved.', canPlay: false });
+        void refreshInstalled().catch(error => log(`Version check failed: ${error.message}`));
       }
       return effective();
     });
@@ -245,7 +283,7 @@ else {
     const install = mode => operation('updating', async () => {
       const { feedUrl, installDir } = requireSettings();
       const release = await loadRelease(feedUrl, { installDir, accessKey: accessKey() });
-      send({ version: release.version, news: release.news ?? [], message: mode === 'full' ? 'Verifying every file and repairing damage.' : 'Installing missing or changed files.' });
+      send({ version: release.version, news: release.news ?? [], available: availableFrom(release), message: mode === 'full' ? 'Verifying every file and repairing damage.' : 'Installing missing or changed files.' });
       await installRelease(installDir, release, progress, { mode, concurrency: config.downloadConcurrency });
       await checkRelease();
     });
@@ -259,6 +297,9 @@ else {
       send({ phase: 'ready', message: 'Client process started.', canPlay: true });
     }));
     await window.loadFile(path.join(here, 'index.html'));
+    // Show installed vs available before the player acts, and notice a new release while the launcher sits open.
+    void refreshVersions();
+    setInterval(() => { if (!busy) void refreshAvailable().catch(error => log(`Version check failed: ${error.message}`)); }, AVAILABLE_INTERVAL_MS).unref();
     if (app.isPackaged) {
       // Tell the swap helper this build starts, so it keeps the update instead of rolling back.
       const updated = argument('--self-updated=');

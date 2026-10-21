@@ -72,6 +72,16 @@ h1 { margin: 0; color: #fff; font-size: clamp(22px, 3.4vw, 28px); line-height: 1
 .status-message { margin: 9px 0 0; max-width: 660px; color: #c8d2e6; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
 .release-detail { display: flex; flex-direction: column; gap: 5px; max-width: 180px; padding: 8px 13px; border: 1px solid var(--frame); border-radius: 3px; background: var(--navy-deep); text-align: right; }
 .detail-label { font-size: 10px; font-weight: 700; letter-spacing: 1.7px; color: var(--gold); }
+.release-detail { min-width: 150px; }
+.release-row { display: flex; flex-direction: column; gap: 2px; }
+.release-value { color: #fff; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.release-detail[data-kind="couldnt-check"] #available-version, .release-detail[data-kind="checking"] #available-version,
+.release-detail[data-kind="unknown"] #installed-version, .release-detail[data-kind="not-installed"] #installed-version { color: var(--muted); font-weight: 400; }
+.release-note { align-self: flex-end; padding: 1px 6px; border: 1px solid var(--frame); border-radius: 2px; font-size: 10px; font-weight: 700; letter-spacing: .5px; color: var(--muted); }
+.release-detail[data-kind="up-to-date"] .release-note { border-color: var(--green-dark); color: var(--green); }
+.release-detail[data-kind="update-available"] { border-color: var(--orange); box-shadow: 0 0 8px #e8891c55; }
+.release-detail[data-kind="update-available"] #available-version { color: var(--orange-light); }
+.release-detail[data-kind="update-available"] .release-note { border-color: var(--orange-ink); color: #2a1404; background: var(--orange-light); }
 #release-version { font-size: 14px; font-weight: 700; color: #fff; overflow-wrap: anywhere; }
 
 /* Release notes from the manifest */
@@ -151,7 +161,7 @@ footer { display: flex; align-items: baseline; gap: 8px; margin-top: 24px; paddi
   .brand-name { font-size: 27px; }
   .launcher { padding: 0 20px 20px; }
   .client-card { padding: 42px 20px 20px; min-height: 160px; }
-  .release-detail { max-width: 120px; }
+  .release-detail { min-width: 0; max-width: 140px; }
   .news-item { padding-inline: 20px; }
   .action-bar { flex-wrap: wrap; gap: 13px; }
   .action-status { flex-basis: 100%; }
@@ -163,7 +173,7 @@ footer { display: flex; align-items: baseline; gap: 8px; margin-top: 24px; paddi
   .brand-name { font-size: 24px; }
   .launcher { padding-inline: 15px; }
   .client-card { grid-template-columns: minmax(0, 1fr); }
-  .release-detail { max-width: none; flex-direction: row; align-items: baseline; gap: 10px; text-align: left; }
+  .release-detail { max-width: none; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 10px 18px; text-align: left; }
   .input-row { flex-wrap: wrap; }
   .input-row .button { width: 100%; }
 }

@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises';
 /** Launcher bookkeeping inside an installation; manifests may never write here. */
 export const STATE_DIRECTORY = '.slumsms-launcher';
 const STATE_FILE = `${STATE_DIRECTORY}/state.json`;
+const INSTALLED_FILE = `${STATE_DIRECTORY}/installed.json`;
 const LAYER_CACHE = `${STATE_DIRECTORY}/layers`;
 const STAGE_PREFIX = '.mapleroot-stage-';
 const MAX_MANIFEST_BYTES = 128 * 1024 * 1024;
@@ -457,6 +458,51 @@ async function writeInstallState(root, release, files) {
   await writeSmallFile(root, STATE_FILE, JSON.stringify(value));
 }
 
+/**
+ * The release this folder last fully verified as: written only after a verify or install that left
+ * nothing pending, unlike state.json, which is a hash cache checkpointed mid-install.
+ * { recordVersion: 1, release, manifestSha256, layers: [{ name, version, sha256 }], verifiedAt }.
+ * Returns null when there is no record or it is unreadable, so the launcher shows "Unknown".
+ */
+export async function readInstalledRecord(root) {
+  try {
+    const bytes = await readSmallFile(root, INSTALLED_FILE);
+    if (!bytes) return null;
+    const value = JSON.parse(bytes.toString('utf8'));
+    if (!value || value.recordVersion !== 1 || typeof value.release !== 'string' || !value.release || value.release.length > 128) return null;
+    const layers = Array.isArray(value.layers) ? value.layers.filter((layer) => layer && typeof layer.name === 'string' && typeof layer.version === 'string')
+      .map(({ name, version, sha256: digestValue }) => ({ name, version, sha256: typeof digestValue === 'string' ? digestValue : '' })) : [];
+    return {
+      release: value.release,
+      manifestSha256: typeof value.manifestSha256 === 'string' ? value.manifestSha256 : '',
+      layers,
+      verifiedAt: typeof value.verifiedAt === 'string' ? value.verifiedAt : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function writeInstalledRecord(root, release, { now = new Date() } = {}) {
+  const value = {
+    recordVersion: 1,
+    release: release.version,
+    manifestSha256: release.manifestSha256 ?? '',
+    layers: (release.layers ?? []).map(({ name, version, sha256: digestValue }) => ({ name, version, sha256: digestValue })),
+    verifiedAt: now.toISOString(),
+  };
+  await writeSmallFile(root, INSTALLED_FILE, JSON.stringify(value));
+  return value;
+}
+
+/** Record a fully verified release, skipping the write when the record already says so. */
+async function recordInstalled(root, release) {
+  if (!release.manifestSha256) return; // the launcher's own channel stages through here too; it is not a game release
+  const current = await readInstalledRecord(root);
+  if (current?.release === release.version && current.manifestSha256 === (release.manifestSha256 ?? '')) return;
+  await writeInstalledRecord(root, release);
+}
+
 const layerCachePath = (digestValue) => `${LAYER_CACHE}/${digestValue}.json`;
 
 async function cachedLayer(installDir, reference, requestUrl) {
@@ -523,6 +569,7 @@ export async function loadRelease(feedUrl, { installDir, accessKey = '' } = {}) 
   const release = Object.freeze({
     schemaVersion: manifest.schemaVersion,
     version: manifest.version,
+    manifestSha256: sha256(top.bytes),
     launch: manifest.launch,
     playerOwned: manifest.playerOwned ?? Object.freeze([]),
     ...(manifest.news ? { news: manifest.news } : {}),
@@ -531,6 +578,31 @@ export async function loadRelease(feedUrl, { installDir, accessKey = '' } = {}) 
   });
   loaded.set(release, { layerSources, access });
   return release;
+}
+
+/**
+ * What the server offers right now, from the top-level manifest only: no layer manifests, no files.
+ * Never throws. status: 'ok' { version, layers, manifestSha256 } | 'access-key' (401/403) |
+ * 'offline' (no connection or timeout) | 'error' (bad response or manifest), each with a message.
+ */
+export async function checkAvailableRelease(feedUrl, { accessKey = '', signal } = {}) {
+  try {
+    const access = feedAccess(feedUrl, accessKey);
+    const top = await readJSON(networkURL(feedUrl), 'release manifest', access, signal ?? AbortSignal.timeout(15_000));
+    const manifest = validateManifest(parseJSON(top.bytes, 'release manifest'));
+    return {
+      status: 'ok',
+      version: manifest.version,
+      layers: (manifest.layers ?? []).map(({ name, version }) => ({ name, version })),
+      manifestSha256: sha256(top.bytes),
+    };
+  } catch (error) {
+    if (error?.code === 'ACCESS_KEY_REQUIRED') return { status: 'access-key', message: ACCESS_KEY_MESSAGE };
+    if (error?.status === undefined && (error?.name === 'TypeError' || error?.name === 'TimeoutError' || error?.name === 'AbortError')) {
+      return { status: 'offline', message: 'Could not reach the update server.' };
+    }
+    return { status: 'error', message: typeof error?.message === 'string' ? error.message : 'The update server sent an unreadable answer.' };
+  }
 }
 
 /** The launcher's own update channel. It sits beside the game manifest and is never a game release layer. */
@@ -670,6 +742,9 @@ export async function inspectRelease(root, release, onProgress = () => {}, { mod
     // Recording newly hashed files keeps the next Play fast; the state is only a cache.
     try { await writeInstallState(result.installation.root, known, result.verified); } catch { /* the next check hashes again */ }
   }
+  if (result.installation.exists && !result.files.length && loaded.has(known)) {
+    try { await recordInstalled(result.installation.root, known); } catch { /* shown as Unknown until the next verify */ }
+  }
   return { files: result.files, bytes: result.bytes, hashed: result.hashed };
 }
 
@@ -720,6 +795,7 @@ export async function installRelease(root, release, onProgress = () => {}, optio
   if (!pending.files.length) {
     await saveState();
     await writeLayerCache(installation.root, release);
+    await recordInstalled(installation.root, release).catch(() => {});
     return result;
   }
   const stage = await fs.mkdtemp(path.join(installation.root, STAGE_PREFIX));
@@ -791,6 +867,7 @@ export async function installRelease(root, release, onProgress = () => {}, optio
     await checkpoint.catch(() => {});
     await saveState();
     await writeLayerCache(installation.root, release);
+    await recordInstalled(installation.root, release).catch(() => {});
     complete = true;
     return result;
   } finally {

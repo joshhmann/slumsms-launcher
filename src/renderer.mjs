@@ -1,6 +1,8 @@
+import { versionStatus, versionFooter } from './version-status.mjs';
+
 const elements = Object.fromEntries([
   'phase-badge', 'phase-label', 'status-eyebrow', 'status-heading', 'status-message',
-  'install-target', 'install-target-path', 'change-folder-inline', 'release-version',
+  'install-target', 'install-target-path', 'change-folder-inline', 'release-detail', 'installed-version', 'available-version', 'release-note',
   'news', 'news-list', 'progress-area', 'progress-label', 'progress-detail', 'operation-progress',
   'action-help', 'play', 'play-label', 'error-message', 'open-settings', 'settings-dialog',
   'close-settings', 'install-dir', 'folder-source', 'choose-folder', 'open-folder', 'repair-files',
@@ -145,11 +147,28 @@ function renderNews() {
 
 function primaryAction() {
   if (!configuration.feedUrl || (state.phase === 'error' && state.accessKeyNeeded)) return { kind: 'settings', label: 'Open settings', run: openSettings };
+  // A newer release seen by the background check while the old one is ready: Update installs it.
+  if (state.phase === 'ready' && versionStatus(state.installed, state.available).kind === 'update-available') {
+    return { kind: 'update', label: 'Update', run: () => perform('update', () => bridge.update()) };
+  }
   if (state.phase === 'ready' && state.canPlay) return { kind: 'play', label: 'Play', run: () => perform('play', () => bridge.play()) };
   if (state.phase === 'needs-update') {
     return { kind: 'update', label: state.fresh ? 'Install' : 'Update', run: () => perform('update', () => bridge.update()) };
   }
   return { kind: 'check', label: state.phase === 'error' ? 'Try again' : 'Check for updates', run: checkNow };
+}
+
+function renderVersions() {
+  const status = versionStatus(state.installed, state.available);
+  // Same version but files failed verify: not "up to date" until repaired.
+  const note = status.kind === 'up-to-date' && state.phase === 'needs-update' ? 'Files need repair' : status.note;
+  elements['release-detail'].dataset.kind = note === 'Files need repair' ? 'update-available' : status.kind;
+  elements['installed-version'].textContent = status.installedLabel;
+  elements['installed-version'].title = status.installedTitle;
+  elements['available-version'].textContent = status.availableLabel;
+  elements['available-version'].title = status.availableTitle;
+  elements['release-note'].textContent = note;
+  elements['release-note'].hidden = !note;
 }
 
 function busyLabel() {
@@ -183,7 +202,7 @@ function render() {
   elements['install-target'].hidden = !fresh;
   elements['install-target-path'].textContent = configuration.installDir;
   elements['change-folder-inline'].disabled = blocked;
-  elements['release-version'].textContent = state.version || 'Not checked';
+  renderVersions();
   renderNews();
 
   elements.play.dataset.action = action.kind;
@@ -228,8 +247,7 @@ function render() {
     saved: 'Using the key you saved. Enter a new one to replace it.',
     'built-in': 'Using the key built into this launcher. Enter one to override it.',
   }[configuration.accessKeySource] ?? 'Only needed if the update server asks for one.';
-  elements['version-info'].textContent = [configuration.appVersion && `Launcher ${configuration.appVersion}`, state.version && `Game ${state.version}`]
-    .filter(Boolean).join(' · ');
+  elements['version-info'].textContent = versionFooter(configuration.appVersion, state.installed, state.available);
 
   let help;
   if (!bridgeAvailable) help = 'Open SlumsMS in the desktop launcher to manage your client.';
@@ -237,6 +255,7 @@ function render() {
   else if (phase === 'self-updating') help = 'The launcher restarts by itself when the update is ready.';
   else if (busy) help = 'Keep the launcher open while this finishes.';
   else if (!configuration.feedUrl) help = 'Set the update server in Settings to get started.';
+  else if (phase === 'ready' && state.canPlay && action.kind === 'update') help = 'A new release is out. Update downloads only the files that changed.';
   else if (phase === 'ready' && state.canPlay) help = 'All game files verified.';
   else if (fresh) help = 'Install downloads the game, then checks every file.';
   else if (phase === 'needs-update') help = 'Update downloads only the files that changed.';
