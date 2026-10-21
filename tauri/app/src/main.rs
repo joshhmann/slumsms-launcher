@@ -13,6 +13,13 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 fn main() {
     let started = std::time::Instant::now();
     let args = Args::parse(std::env::args().skip(1).collect());
+    // The release build aborts on panic; leave a note where support can find it.
+    let crash_dir = args.data_dir.clone().unwrap_or_else(std::env::temp_dir);
+    std::panic::set_hook(Box::new(move |info| {
+        let text = format!("{} SlumsMS Launcher {VERSION} crashed: {info}\n", slums_core::release::iso_now());
+        eprintln!("{text}");
+        let _ = std::fs::OpenOptions::new().create(true).append(true).open(crash_dir.join("slumsms-launcher-crash.log")).and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
+    }));
     if args.version {
         platform::print_out(&format!("SlumsMS Launcher {VERSION}"));
         return;

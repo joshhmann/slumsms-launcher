@@ -17,10 +17,10 @@ import { createServer } from 'node:http';
 import { createReadStream } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const { publishLayer, publishPacks, publishLayeredRelease } = await import(path.join(here, '..', '..', 'tools', 'publish.mjs'));
+const { publishLayer, publishPacks, publishLayeredRelease } = await import(pathToFileURL(path.join(here, '..', '..', 'tools', 'publish.mjs')).href);
 export const PLAYER = { user: 'slums', key: 'player-local' };
 export const DEV = { user: 'slumsdev', key: 'dev-local' };
 
