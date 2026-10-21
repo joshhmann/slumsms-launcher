@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { loadRelease, inspectRelease, installRelease, loadLauncherChannel, readInstalledRecord, checkAvailableRelease } from './updater.mjs';
 import { launcherUpdateDecision, prepareLauncherUpdate, startLauncherSwap, cleanupLauncherUpdates, healthyMarker } from './self-update.mjs';
 import { reuseVerified, playPlan } from './version-status.mjs';
+import { loadTauriChannel, downloadTauriBuild, verifyTauriSignature, handoverToTauri, TAURI_PUBLIC_KEY } from './handover.mjs';
 import { readGameConfig, writeGameConfig, gameRunning } from './game-config.mjs';
 import { DEFAULT_VALUES, validateChanges } from './game-options.mjs';
 import { readLauncherConfig, detectBundledClient, standaloneInstallDir, validateFeedUrl, validAccessKey, effectiveAccessKey } from './launcher-config.mjs';
@@ -220,6 +221,46 @@ async function selfUpdate() {
   } finally { clearInterval(watchdog); }
 }
 
+// Hand-over (1.5.0, the last Electron release): once per session, after the Electron self-update
+// found nothing newer, fetch the Tauri launcher from this channel's tauri/launcher.json, verify its
+// signature and swap it in under the same exe name. Any failure is logged and this launcher carries on.
+let handoverChecked = false;
+async function handover() {
+  if (handoverChecked) return false;
+  handoverChecked = true;
+  if (!app.isPackaged || process.platform !== 'win32') return false;
+  if (process.argv.includes('--no-handover') || process.env.SLUMSMS_NO_HANDOVER === '1') return false;
+  const { feedUrl } = effective();
+  if (!feedUrl) return false;
+  const stalled = new AbortController();
+  let watchdog;
+  try {
+    const channel = await loadTauriChannel(feedUrl, { accessKey: accessKey(), signal: AbortSignal.timeout(15_000) });
+    if (!channel) { await log('Hand-over: no Tauri launcher published on this channel.'); return false; }
+    const message = 'Moving to the new launcher…';
+    send({ phase: 'self-updating', message, filesDone: 0, filesTotal: 1, bytesDone: 0, bytesTotal: 0 });
+    await log(`Hand-over: downloading launcher ${channel.version} (running ${app.getVersion()}).`);
+    let last = Date.now();
+    let received = 0;
+    watchdog = setInterval(() => { if (Date.now() - last > 60_000) stalled.abort(new Error('The launcher download stalled.')); }, 5_000);
+    const bytes = await downloadTauriBuild(feedUrl, channel, { accessKey: accessKey(), signal: stalled.signal,
+      onBytes: count => { last = Date.now(); received += count; progress({ message, filesDone: 0, filesTotal: 1, bytesDone: received, bytesTotal: 0 }); } });
+    verifyTauriSignature(bytes, channel.signature, TAURI_PUBLIC_KEY, channel.version);
+    if (bytes.length < 1024 || bytes.subarray(0, 2).toString('latin1') !== 'MZ') throw new Error('The downloaded launcher is not a Windows program.');
+    send({ message: 'Starting the new launcher…' });
+    const relaunchArgs = process.argv.slice(1).filter(value => value.startsWith('--feed-url=') || value.startsWith('--install-dir='));
+    const result = await handoverToTauri({ launcherDir: launcherFolder(), exeName: path.basename(app.getPath('exe')), bytes, version: channel.version,
+      fromVersion: app.getVersion(), relaunchArgs, log: message => void log(message) });
+    if (result === 'handed-over') { await log(`Hand-over: launcher ${channel.version} is running; this one exits.`); app.exit(0); return true; }
+    throw new Error(result);
+  } catch (error) {
+    await log(`Hand-over failed; keeping launcher ${app.getVersion()}: ${error.message}`);
+    if (error.code === 'ACCESS_KEY_REQUIRED') handoverChecked = false;
+    send({ phase: 'checking', message: 'Checking for updates…', filesDone: 0, filesTotal: 0, bytesDone: 0, bytesTotal: 0 });
+    return false;
+  } finally { clearInterval(watchdog); }
+}
+
 // Game options (config.ini). Writes are serialized; while the game runs, changes wait in
 // settings.json (per game folder) and are written when the game is closed and the panel is
 // opened again, or at the next Play.
@@ -360,7 +401,7 @@ else {
       const failure = await shell.openPath(installDir);
       if (failure) throw new Error(failure);
     });
-    handle('check', () => operation('checking', async () => { if (!(await selfUpdate())) await checkRelease(); }).then(() => undefined));
+    handle('check', () => operation('checking', async () => { if (!(await selfUpdate()) && !(await handover())) await checkRelease(); }).then(() => undefined));
     // Download and verify what the folder lacks; also the first half of Play when a new release is out.
     const installFiles = async (mode, message) => {
       const { feedUrl, installDir } = requireSettings();

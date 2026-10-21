@@ -171,6 +171,17 @@ node tools/publish.mjs --launcher /srv/slums-staging/launcher-1.3.1 --out /srv/r
 
 The publisher reads the version from the build's own `resources/app.asar` (`--version X.Y.Z` is only a cross-check), copies and hashes every file into the immutable `launcher/win32-x64/VERSION/`, and writes `launcher.json` last. It refuses a version that is not newer than the published one, a build without a built-in access key (friends would lose access to every later update; `--allow-no-access-key` for an open server), a missing `SlumsMS Launcher.exe` and a `launcher.config.json` in the build folder. `--platform` (default `win32-x64`) and `--exe` select other targets. Uploading follows the game rule: version folder first, `launcher.json` last. Publishing the launcher never changes `manifest.json`, and publishing a game release never changes `launcher.json`.
 
+## Hand-over to the Tauri launcher (1.5.0)
+
+1.5.0 is the last Electron release. It is published to the Electron channel (`launcher.json`) like any launcher update, so every Electron launcher self-updates to it (only `resources/app.asar` changes). On its next start, after its own self-update check finds nothing newer, it moves to the Tauri launcher (`src/handover.mjs`):
+
+1. Fetch `tauri/launcher.json` beside the feed's `manifest.json` (Tauri updater format: `{ version, platforms: { "windows-x86_64": { url, signature } } }`) with the same access key, origin and redirect rules as the game manifest. No file (404): nothing happens. The build URL must be HTTPS on the feed's own origin.
+2. Download it (key only to the feed origin; stall watchdog; "Moving to the new launcher…" with progress) and verify its minisign signature against the Tauri updater public key built into 1.5.0 (`TAURI_PUBLIC_KEY`), including the signed `version:` in the trusted comment.
+3. Stage it in `.slumsms-launcher-update/handover-VERSION/`, rename the running `SlumsMS Launcher.exe` to `.slumsms-launcher-update/electron-rollback/SlumsMS Launcher.exe`, move the Tauri exe in under the same name (shortcuts keep working) and start it with `--handover-from=electron-1.5.0` (plus `--feed-url=`/`--install-dir=` if given).
+4. The Tauri launcher writes `.slumsms-launcher-update/healthy-VERSION` once its window has loaded; then Electron exits. If it exits early or stays silent for 90 s, Electron kills it, keeps it as `failed-handover-VERSION-SlumsMS Launcher.exe`, renames its own exe back and carries on (no new attempt that session).
+
+Only the exe is replaced. `resources/` (the Tauri launcher reads `resources/app.asar` once to carry over a friends build's built-in access key), the Electron DLLs and `locales/` stay until a later cleanup. Settings migrate on the Tauri side (it reads `%APPDATA%\mapleroot-launcher\settings.json` without changing it). `--no-handover` or `SLUMSMS_NO_HANDOVER=1` turns the hand-over off.
+
 ## Fast verify vs Repair
 
 After every successful install, update or repair the launcher writes `.slumsms-launcher/state.json` inside the game folder: for each managed file its relative path, size, mtime and SHA-256.

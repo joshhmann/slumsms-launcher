@@ -310,6 +310,32 @@ async function request(input, signal, access = null, extraHeaders = {}) {
   throw permanent(new Error('Release request exceeded the redirect limit.'));
 }
 
+/**
+ * Fetch one document or file from the feed's origin with the same access-key, redirect and HTTPS
+ * rules as the game manifest (the hand-over to the Tauri launcher uses it). maxBytes caps the body;
+ * onBytes(count) reports progress. Errors carry .status (404 = not published).
+ */
+export async function readFeedBytes(input, label, { feedUrl, accessKey = '', signal, maxBytes = MAX_MANIFEST_BYTES, onBytes = () => {} } = {}) {
+  const access = feedAccess(feedUrl ?? input, accessKey);
+  const { response, url } = await request(networkURL(input).href, signal, access);
+  const declared = Number(response.headers.get('content-length'));
+  if (declared > maxBytes) { await response.body?.cancel(); throw permanent(new Error(`${label} is too large.`)); }
+  const chunks = [];
+  let size = 0;
+  if (response.body) {
+    for await (const chunk of response.body) {
+      size += chunk.length;
+      if (size > maxBytes) throw permanent(new Error(`${label} is too large.`));
+      chunks.push(Buffer.from(chunk));
+      onBytes(chunk.length);
+    }
+  }
+  return { bytes: Buffer.concat(chunks), finalUrl: url.href };
+}
+
+/** The release URL rules (absolute, HTTPS or loopback HTTP, no credentials/fragment), exported for the hand-over. */
+export const releaseURL = (input) => networkURL(input);
+
 async function readJSON(input, label, access, signal) {
   const { response, url } = await request(input, signal, access);
   const declared = Number(response.headers.get('content-length'));
