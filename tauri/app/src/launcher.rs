@@ -126,6 +126,9 @@ pub struct Launcher {
     last_progress: Mutex<Instant>,
     ready: tokio::sync::watch::Receiver<bool>,
     ready_tx: tokio::sync::watch::Sender<bool>,
+    /// Set once the first channel probe has answered (or failed).
+    probed: tokio::sync::watch::Receiver<bool>,
+    probed_tx: tokio::sync::watch::Sender<bool>,
 }
 
 fn now_ms() -> u64 {
@@ -195,6 +198,7 @@ impl Launcher {
         state.insert("available".into(), json!({ "status": "checking" }));
         state.insert("migrationQuestion".into(), serde_json::to_value(&settings.migration_question).unwrap_or(Value::Null));
         let (ready_tx, ready) = tokio::sync::watch::channel(false);
+        let (probed_tx, probed) = tokio::sync::watch::channel(false);
         let launcher = Launcher {
             app,
             args,
@@ -215,6 +219,8 @@ impl Launcher {
             last_progress: Mutex::new(Instant::now() - Duration::from_secs(1)),
             ready,
             ready_tx,
+            probed,
+            probed_tx,
         };
         launcher.log(&format!("SlumsMS Launcher {VERSION} starting ({}).", launcher.exe.display()));
         if let Some(error) = &config_error {
@@ -342,6 +348,11 @@ impl Launcher {
     async fn wait_ready(&self) {
         let mut ready = self.ready.clone();
         let _ = ready.wait_for(|r| *r).await;
+        // A Test/RC choice is only used once the server has said this key may use it.
+        if self.inner.lock().unwrap().settings.channel != Channel::Live {
+            let mut probed = self.probed.clone();
+            let _ = tokio::time::timeout(Duration::from_secs(20), probed.wait_for(|p| *p)).await;
+        }
     }
 
     // -----------------------------------------------------------------------------------------
@@ -353,6 +364,7 @@ impl Launcher {
         }
         let _ = self.ready_tx.send(true);
         self.refresh_channels().await;
+        let _ = self.probed_tx.send(true);
         self.refresh_versions(false).await;
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
