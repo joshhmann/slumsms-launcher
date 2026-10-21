@@ -176,6 +176,10 @@ test('publishPacks is deterministic, immutable, verifies published files, and --
   for (const name of listing) {
     assert.deepEqual(await readFile(path.join(root, 'one/layers/base/b1/packs', name)), await readFile(path.join(root, 'two/layers/base/b1/packs', name)), name);
   }
+  if (process.platform !== 'win32') {
+    // The web server must be able to list and read packs/ (mkdtemp makes it 0700).
+    assert.equal((await stat(path.join(root, 'one/layers/base/b1/packs'))).mode & 0o777, 0o755);
+  }
   assert.equal(results[0].files, 61);
   assert.equal(results[0].packedFiles, 60); // the duplicate is stored once
   const index = JSON.parse(await readFile(path.join(root, 'one/layers/base/b1/packs/index.json'), 'utf8'));

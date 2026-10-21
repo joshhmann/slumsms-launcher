@@ -327,6 +327,8 @@ export async function publishPacks({ output, layer, version, packSize = DEFAULT_
       const indexBody = `${JSON.stringify(index)}\n`;
       await fs.writeFile(path.join(temporary, PACK_INDEX_FILE), indexBody, { flag: 'wx' });
       // A directory rename onto a new name is atomic: packs/ appears complete or not at all.
+      // mkdtemp makes the folder 0700; the web server must be able to read it (found on 164: nginx 404/EACCES).
+      await fs.chmod(temporary, 0o755);
       await fs.rename(temporary, path.join(versionDirectory, PACKS_DIRECTORY));
       return {
         url: packsUrl(layer, version), sha256: digestBytes(indexBody), packs: packs.length,
