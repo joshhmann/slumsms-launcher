@@ -1,4 +1,4 @@
-import { versionStatus, versionFooter, formatTimeLeft } from './version-status.mjs';
+import { versionStatus, versionFooter, formatTimeLeft, feedLabel } from './version-status.mjs';
 import { GAME_OPTIONS } from './game-options.mjs';
 
 const elements = Object.fromEntries([
@@ -7,7 +7,7 @@ const elements = Object.fromEntries([
   'news', 'news-list', 'progress-area', 'progress-label', 'progress-detail', 'operation-progress',
   'action-help', 'play', 'play-label', 'error-message', 'open-settings', 'settings-dialog',
   'close-settings', 'install-dir', 'folder-source', 'choose-folder', 'open-folder', 'repair-files',
-  'feed-form', 'feed-url', 'feed-help', 'feed-notice', 'save-feed', 'reset-feed', 'settings-error',
+  'feed-line', 'reset-folder', 'feed-form', 'feed-url', 'feed-help', 'feed-notice', 'save-feed', 'reset-feed', 'settings-error',
   'version-info', 'open-options', 'options-dialog', 'close-options', 'options-notice', 'options-form', 'restore-options', 'options-saved', 'access-key-form', 'access-key', 'access-key-help', 'save-access-key', 'clear-access-key',
 ].map((id) => [id, document.getElementById(id)]));
 
@@ -32,10 +32,10 @@ const phaseHeadings = {
   error: 'Let’s get you back on track.',
 };
 const busyPhases = new Set(['checking', 'updating', 'self-updating', 'launching']);
-const bridgeMethods = ['settings', 'saveFeed', 'resetFeed', 'saveAccessKey', 'clearAccessKey', 'chooseFolder', 'openFolder', 'check', 'update', 'repair', 'play', 'onState'];
+const bridgeMethods = ['settings', 'saveFeed', 'resetFeed', 'saveAccessKey', 'clearAccessKey', 'chooseFolder', 'openFolder', 'check', 'update', 'repair', 'play', 'resetFolder', 'onState'];
 const bridge = window.launcher;
 const bridgeAvailable = bridgeMethods.every((method) => typeof bridge?.[method] === 'function');
-const configuration = { feedUrl: '', installDir: '', defaultFeedUrl: '', feedOverridden: false, installDirSource: 'default', accessKeySource: 'none', appVersion: '' };
+const configuration = { feedUrl: '', installDir: '', defaultFeedUrl: '', liveFeedUrl: '', feedOverridden: false, installDirSource: 'default', accessKeySource: 'none', appVersion: '' };
 let state = { phase: 'idle', message: 'Loading launcher settings…', canPlay: false };
 let initialized = false;
 let operation = null;
@@ -277,9 +277,10 @@ const resuming = () => state.phase === 'needs-update' && state.fresh && state.ke
 
 function primaryAction() {
   if (!configuration.feedUrl || (state.phase === 'error' && state.accessKeyNeeded)) return { kind: 'settings', label: 'Open settings', run: openSettings };
-  // A newer release seen by the background check while the old one is ready: Update installs it.
+  // A newer release seen by the background check while the old one is ready: Update installs it and
+  // starts the game (Play itself re-checks the server, so it updates first either way).
   if (state.phase === 'ready' && versionStatus(state.installed, state.available).kind === 'update-available') {
-    return { kind: 'update', label: 'Update', run: () => perform('update', () => bridge.update()) };
+    return { kind: 'update', label: 'Update', run: () => perform('play', () => bridge.play()) };
   }
   if (state.phase === 'ready' && state.canPlay) return { kind: 'play', label: 'Play', run: () => perform('play', () => bridge.play()) };
   if (state.phase === 'needs-update') {
@@ -302,9 +303,9 @@ function renderVersions() {
 }
 
 function busyLabel() {
-  if (operation === 'play' || state.phase === 'launching') return 'Launching…';
   if (state.phase === 'self-updating') return 'Updating launcher…';
   if (state.phase === 'updating' || operation === 'update') return state.fresh || state.resumed ? 'Installing…' : 'Updating…';
+  if (operation === 'play' || state.phase === 'launching') return 'Launching…';
   if (state.phase === 'checking' || operation === 'check') return 'Checking…';
   return 'Working…';
 }
@@ -336,6 +337,10 @@ function render() {
   elements['change-folder-inline'].disabled = blocked;
   renderVersions();
   renderNews();
+  const feed = feedLabel(configuration.feedUrl, configuration);
+  elements['feed-line'].textContent = initialized ? feed.text : '';
+  elements['feed-line'].title = configuration.feedUrl;
+  elements['feed-line'].dataset.warn = feed.warn ? 'true' : 'false';
 
   elements.play.dataset.action = action.kind;
   elements.play.disabled = blocked;
@@ -362,8 +367,8 @@ function render() {
   elements['feed-url'].disabled = blocked;
   elements['save-feed'].disabled = blocked || !dirty;
   elements['save-feed'].textContent = operation === 'save' ? 'Saving…' : 'Save';
-  elements['reset-feed'].hidden = !configuration.feedOverridden || !configuration.defaultFeedUrl;
-  elements['reset-feed'].disabled = blocked;
+  elements['reset-feed'].disabled = blocked || !configuration.feedOverridden || !configuration.defaultFeedUrl;
+  elements['reset-folder'].disabled = blocked || configuration.installDirSource !== 'saved';
   elements['feed-help'].textContent = configuration.feedOverridden && configuration.defaultFeedUrl
     ? `Using a custom server. Default: ${configuration.defaultFeedUrl}`
     : 'Only change this if your server staff gave you a different manifest URL.';
@@ -387,7 +392,8 @@ function render() {
   else if (phase === 'self-updating') help = 'The launcher restarts by itself when the update is ready.';
   else if (busy) help = 'Keep the launcher open while this finishes.';
   else if (!configuration.feedUrl) help = 'Set the update server in Settings to get started.';
-  else if (phase === 'ready' && state.canPlay && action.kind === 'update') help = 'A new release is out. Update downloads only the files that changed.';
+  else if (phase === 'ready' && state.canPlay && action.kind === 'update') help = 'A new release is out. Update downloads only the files that changed, then starts the game.';
+  else if (phase === 'ready' && state.offlinePlay) help = 'Couldn’t check for updates. If the game says it is out of date, try again once you are online.';
   else if (phase === 'ready' && state.canPlay) help = 'All game files verified.';
   else if (resuming()) help = 'Continue install picks up where the last download stopped.';
   else if (fresh) help = 'Install downloads the game, then checks every file.';
@@ -474,6 +480,7 @@ elements['clear-access-key'].addEventListener('click', () => {
   void changeSettings('access-key', () => bridge.clearAccessKey(), { recheck: true });
 });
 elements['reset-feed'].addEventListener('click', () => void changeSettings('save', () => bridge.resetFeed()));
+elements['reset-folder'].addEventListener('click', () => void changeSettings('folder', () => bridge.resetFolder()));
 const chooseFolder = () => void changeSettings('folder', () => bridge.chooseFolder());
 elements['choose-folder'].addEventListener('click', chooseFolder);
 elements['change-folder-inline'].addEventListener('click', chooseFolder);

@@ -60,10 +60,10 @@ test('installed record: missing folder, missing file and corrupt file all read a
 test('installed record round-trips release, layer versions and manifest hash', async (t) => {
   const f = await fixture(t);
   await mkdir(f.install, { recursive: true });
-  const release = { version: '1.4.0', manifestSha256: 'a'.repeat(64), layers: [{ name: 'base', version: 'v83-2026.10.19', sha256: 'b'.repeat(64), cached: true }, { name: 'client', version: '1.4.0', sha256: 'c'.repeat(64) }] };
+  const release = { version: '1.4.0', manifestSha256: 'a'.repeat(64), launch: { executable: 'SlumsMS.exe', args: ['--x'] }, layers: [{ name: 'base', version: 'v83-2026.10.19', sha256: 'b'.repeat(64), cached: true }, { name: 'client', version: '1.4.0', sha256: 'c'.repeat(64) }] };
   await writeInstalledRecord(f.install, release, { now: new Date('2026-10-21T10:00:00Z') });
   assert.deepEqual(await readInstalledRecord(f.install), {
-    release: '1.4.0', manifestSha256: 'a'.repeat(64), verifiedAt: '2026-10-21T10:00:00.000Z',
+    release: '1.4.0', manifestSha256: 'a'.repeat(64), verifiedAt: '2026-10-21T10:00:00.000Z', launch: { executable: 'SlumsMS.exe', args: ['--x'] },
     layers: [{ name: 'base', version: 'v83-2026.10.19', sha256: 'b'.repeat(64) }, { name: 'client', version: '1.4.0', sha256: 'c'.repeat(64) }],
   });
   // Junk layer entries are dropped rather than failing the whole record.
@@ -71,6 +71,13 @@ test('installed record round-trips release, layer versions and manifest hash', a
   raw.layers.push(null, { name: 7 });
   await writeFile(path.join(f.install, RECORD), JSON.stringify(raw));
   assert.equal((await readInstalledRecord(f.install)).layers.length, 2);
+  // Records from before 1.3.3 have no launch; a damaged one reads as none, not as a broken record.
+  delete raw.launch;
+  await writeFile(path.join(f.install, RECORD), JSON.stringify(raw));
+  assert.equal((await readInstalledRecord(f.install)).launch, null);
+  raw.launch = { executable: '../evil.exe', args: [] };
+  await writeFile(path.join(f.install, RECORD), JSON.stringify(raw));
+  assert.equal((await readInstalledRecord(f.install)).launch, null);
 });
 
 test('install writes the record; a verify with pending files does not change it; the next update does', async (t) => {
@@ -86,6 +93,7 @@ test('install writes the record; a verify with pending files does not change it;
   let record = await readInstalledRecord(f.install);
   assert.equal(record.release, '1.3.0');
   assert.equal(record.manifestSha256, first.manifestSha256);
+  assert.deepEqual(record.launch, { executable: 'SlumsMS.exe', args: [] });
   assert.deepEqual(record.layers.map(({ name, version }) => [name, version]), [['base', 'v83-b1'], ['client', '1.3.0']]);
 
   // 1.4.0 ships a changed client: verifying against it leaves 1.3.0 recorded.

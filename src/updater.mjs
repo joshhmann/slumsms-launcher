@@ -469,8 +469,9 @@ async function writeInstallState(root, release, files) {
 /**
  * The release this folder last fully verified as: written only after a verify or install that left
  * nothing pending, unlike state.json, which is a hash cache checkpointed mid-install.
- * { recordVersion: 1, release, manifestSha256, layers: [{ name, version, sha256 }], verifiedAt }.
- * Returns null when there is no record or it is unreadable, so the launcher shows "Unknown".
+ * { recordVersion: 1, release, manifestSha256, layers: [{ name, version, sha256 }], verifiedAt, launch? }.
+ * `launch` ({ executable, args }, from 1.3.3) lets Play start the installed client when the update
+ * server cannot be reached; older records have none (null). Returns null when there is no record or it is unreadable, so the launcher shows "Unknown".
  */
 export async function readInstalledRecord(root) {
   try {
@@ -485,10 +486,16 @@ export async function readInstalledRecord(root) {
       manifestSha256: typeof value.manifestSha256 === 'string' ? value.manifestSha256 : '',
       layers,
       verifiedAt: typeof value.verifiedAt === 'string' ? value.verifiedAt : '',
+      launch: recordedLaunch(value.launch),
     };
   } catch {
     return null;
   }
+}
+
+function recordedLaunch(value) {
+  if (value === undefined || value === null) return null;
+  try { return validateLaunch(value); } catch { return null; }
 }
 
 export async function writeInstalledRecord(root, release, { now = new Date() } = {}) {
@@ -498,6 +505,7 @@ export async function writeInstalledRecord(root, release, { now = new Date() } =
     manifestSha256: release.manifestSha256 ?? '',
     layers: (release.layers ?? []).map(({ name, version, sha256: digestValue }) => ({ name, version, sha256: digestValue })),
     verifiedAt: now.toISOString(),
+    ...(release.launch ? { launch: { executable: release.launch.executable, args: [...release.launch.args] } } : {}),
   };
   await writeSmallFile(root, INSTALLED_FILE, JSON.stringify(value));
   return value;
@@ -507,7 +515,7 @@ export async function writeInstalledRecord(root, release, { now = new Date() } =
 async function recordInstalled(root, release) {
   if (!release.manifestSha256) return; // the launcher's own channel stages through here too; it is not a game release
   const current = await readInstalledRecord(root);
-  if (current?.release === release.version && current.manifestSha256 === (release.manifestSha256 ?? '')) return;
+  if (current?.release === release.version && current.manifestSha256 === (release.manifestSha256 ?? '') && current.launch) return;
   await writeInstalledRecord(root, release);
 }
 

@@ -71,3 +71,41 @@ export function reuseVerified({ recent, installDir, feedUrl, now, maxAgeMs, exec
   if (!(now - recent.at >= 0 && now - recent.at <= maxAgeMs) || !executablePresent) return false;
   return offered?.status === 'ok' && Boolean(recent.release?.manifestSha256) && offered.manifestSha256 === recent.release.manifestSha256;
 }
+
+/**
+ * What Play does, decided right before launching from a fresh look at the top-level manifest
+ * (`offered`, checkAvailableRelease's answer) and the folder's installed.json record (`record`).
+ *   'offline' - the check failed (no connection, 401/403, bad answer): start the installed client and
+ *               say "Couldn't check for updates"; the game server refuses a client that is too old.
+ *   'update'  - the server offers a release this folder has not verified as: update, then start.
+ *   'verify'  - the folder says it is this release: fast-verify (or reuse a recent verify), then start.
+ */
+export function playPlan({ offered, record }) {
+  if (offered?.status !== 'ok') return 'offline';
+  if (!record?.manifestSha256 || record.manifestSha256 !== offered.manifestSha256) return 'update';
+  return 'verify';
+}
+
+/**
+ * The feed line on the main screen: "Feed: live" for the shipped live feed, otherwise a short name
+ * ("test (launcher-rc)" on the live host, "custom (host/dir)" elsewhere). `warn` when the feed is not
+ * this build's default, so a feed changed by hand (or by another launcher) is never silent.
+ */
+export function feedLabel(feedUrl, { liveFeedUrl = '', defaultFeedUrl = '' } = {}) {
+  if (!feedUrl) return { text: 'Feed: none set', warn: true, name: '' };
+  let name;
+  try {
+    const url = new URL(feedUrl);
+    const live = liveFeedUrl ? new URL(liveFeedUrl) : null;
+    const folders = url.pathname.split('/').filter(Boolean);
+    if (folders.length && /\.json$/iu.test(folders.at(-1))) folders.pop();
+    const folder = folders.at(-1) ?? '';
+    if (feedUrl === liveFeedUrl) name = 'live';
+    else if (live && url.host === live.host) name = folder ? `test (${folder})` : 'test';
+    else name = `custom (${url.host}${folder ? `/${folder}` : ''})`;
+  } catch {
+    name = 'custom';
+  }
+  const warn = feedUrl !== defaultFeedUrl;
+  return { name, warn, text: `Feed: ${name}${warn ? ' · not this launcher’s default' : ''}` };
+}

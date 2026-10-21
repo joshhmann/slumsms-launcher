@@ -1,11 +1,12 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
-import { readFile, writeFile, appendFile, mkdir, rename, stat } from 'node:fs/promises';
+import { writeFile, appendFile, mkdir, rename, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { loadRelease, inspectRelease, installRelease, loadLauncherChannel, readInstalledRecord, checkAvailableRelease } from './updater.mjs';
 import { launcherUpdateDecision, prepareLauncherUpdate, startLauncherSwap, cleanupLauncherUpdates, healthyMarker } from './self-update.mjs';
-import { reuseVerified } from './version-status.mjs';
+import { reuseVerified, playPlan } from './version-status.mjs';
+import { loadInstallSettings, writeInstallSettings, settingsPath } from './settings-store.mjs';
 import { readGameConfig, writeGameConfig, gameRunning } from './game-config.mjs';
 import { DEFAULT_VALUES, validateChanges } from './game-options.mjs';
 import { readLauncherConfig, detectBundledClient, standaloneInstallDir, validateFeedUrl, validAccessKey, effectiveAccessKey } from './launcher-config.mjs';
@@ -13,15 +14,17 @@ import { readLauncherConfig, detectBundledClient, standaloneInstallDir, validate
 const here = path.dirname(fileURLToPath(import.meta.url));
 const page = pathToFileURL(path.join(here, 'index.html')).href;
 let window;
-// settings.json (per-user app data, never the game folder) holds only the player's overrides;
-// launcher.config.json supplies the defaults. The access key never leaves the main process.
+// settings.json (per-user app data, never the game folder, one per launcher install folder; see
+// settings-store.mjs) holds only the player's overrides; launcher.config.json supplies the defaults. The access key never leaves the main process.
 let settings = { feedUrl: '', installDir: '', accessKey: '', pendingGameOptions: null };
 let config = { feedUrl: '', clientExecutable: '', downloadConcurrency: 12, accessKey: '' };
 let bundledDir = '';
+// The feed shipped inside the app (src/launcher.config.json): the one the main screen calls "live".
+let liveFeedUrl = '';
 let busy = false;
 let state = { phase: 'idle', message: 'Checking for updates…', canPlay: false, installed: { status: 'unknown' }, available: { status: 'checking' } };
 const AVAILABLE_INTERVAL_MS = 10 * 60_000;
-const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
+const settingsFile = () => settingsPath(app.getPath('userData'), path.dirname(app.getPath('exe')));
 const logFile = () => path.join(app.getPath('userData'), 'launcher.log');
 const argument = flag => process.argv.find(value => value.startsWith(flag))?.slice(flag.length);
 
@@ -43,6 +46,7 @@ function effective() {
     feedUrl: settings.feedUrl || config.feedUrl,
     installDir: settings.installDir || bundledDir || standaloneInstallDir({ home: app.getPath('home') }),
     defaultFeedUrl: config.feedUrl,
+    liveFeedUrl,
     feedOverridden: Boolean(settings.feedUrl),
     installDirSource: settings.installDir ? 'saved' : bundledDir ? 'bundled' : 'default',
     accessKeySource: settings.accessKey ? 'saved' : accessKey() ? 'built-in' : 'none',
@@ -54,10 +58,7 @@ function send(patch) {
   if (window && !window.isDestroyed()) window.webContents.send('launcher:state', state);
 }
 async function persist() {
-  await mkdir(path.dirname(settingsFile()), { recursive: true });
-  const temporary = `${settingsFile()}.tmp`;
-  await writeFile(temporary, JSON.stringify(settings, null, 2), { mode: 0o600 });
-  await rename(temporary, settingsFile());
+  await writeInstallSettings(settingsFile(), JSON.stringify(settings, null, 2));
 }
 function requireSettings() {
   const current = effective();
@@ -284,7 +285,10 @@ else {
   app.on('second-instance', () => { if (window?.isMinimized()) window.restore(); window?.focus(); });
   app.whenReady().then(async () => {
     try {
-      const saved = JSON.parse(await readFile(settingsFile(), 'utf8'));
+      const stored = await loadInstallSettings({ userData: app.getPath('userData'), launcherDir: path.dirname(app.getPath('exe')) });
+      if (stored.migrated) await log(`Settings: moved the shared settings.json to this launcher's own ${stored.file}.`);
+      if (stored.text === null) throw Object.assign(new Error('no settings'), { code: 'ENOENT' });
+      const saved = JSON.parse(stored.text);
       settings = { feedUrl: typeof saved.feedUrl === 'string' ? saved.feedUrl : '', installDir: typeof saved.installDir === 'string' ? saved.installDir : '',
         accessKey: validAccessKey(saved.accessKey) ? saved.accessKey : '', pendingGameOptions: readPending(saved.pendingGameOptions) };
     } catch (error) { if (error.code !== 'ENOENT') state.message = `Could not read saved settings: ${error.message}`; }
@@ -296,6 +300,7 @@ else {
     const launcherDir = path.dirname(app.getPath('exe'));
     try {
       config = await readLauncherConfig([path.join(here, 'launcher.config.json'), ...(app.isPackaged ? [path.join(launcherDir, 'launcher.config.json')] : [])]);
+      liveFeedUrl = (await readLauncherConfig([path.join(here, 'launcher.config.json')])).feedUrl;
     } catch (error) { state = { ...state, phase: 'error', message: error.message }; }
     if (app.isPackaged) bundledDir = await detectBundledClient(launcherDir, config.clientExecutable);
     window = new BrowserWindow({ width: 1060, height: 860, minWidth: 860, minHeight: 700, backgroundColor: '#16203a',
@@ -354,6 +359,13 @@ else {
       }
       return effective();
     });
+    handle('resetFolder', async () => {
+      if (busy) throw new Error('Wait for the current operation to finish.');
+      settings.installDir = ''; await persist();
+      send({ phase: 'idle', message: 'Game folder reset to the default.', canPlay: false });
+      void refreshInstalled().catch(error => log(`Version check failed: ${error.message}`));
+      return effective();
+    });
     handle('openFolder', async () => {
       const { installDir } = effective();
       if (!(await exists(installDir))) throw new Error('The game folder does not exist yet. Install the game first.');
@@ -361,9 +373,11 @@ else {
       if (failure) throw new Error(failure);
     });
     handle('check', () => operation('checking', async () => { if (!(await selfUpdate())) await checkRelease(); }).then(() => undefined));
-    const install = mode => operation('updating', async () => {
+    // Download and verify what the folder lacks; also the first half of Play when a new release is out.
+    const installFiles = async (mode, message) => {
       const { feedUrl, installDir } = requireSettings();
       const release = await loadRelease(feedUrl, { installDir, accessKey: accessKey() });
+      send({ phase: 'updating', ...(message ? { message } : {}) });
       send({ version: release.version, news: release.news ?? [], available: availableFrom(release), message: mode === 'full' ? 'Verifying every file and repairing damage.' : 'Checking what is already installed.' });
       installAbort = new AbortController();
       try {
@@ -374,22 +388,52 @@ else {
       await refreshInstalled();
       send({ phase: 'ready', canPlay: true, fresh: false, pendingFiles: 0, pendingBytes: 0, message: 'All release files verified. Ready to play.' });
       void flushPendingGameOptions();
-    });
+      return release;
+    };
+    const install = mode => operation('updating', () => installFiles(mode));
     handle('update', () => install('fast'));
     handle('repair', () => install('full'));
+    // Play always asks the server first: a release that went out while the launcher sat open is
+    // installed before the game starts. Only when the server cannot be asked does Play start the
+    // installed client as-is ("Couldn't check for updates"); the game server's MIN_CLIENT_BUILD gate
+    // refuses it at login if it is really too old.
     handle('play', () => operation('checking', async () => {
-      requireSettings();
-      let release = await recentlyVerified().catch(() => null);
-      if (!release) {
-        const checked = await checkRelease();
-        if (checked.pending.files.length) throw new Error('Install or repair the pending files before playing.');
-        release = checked.release;
+      const { feedUrl, installDir } = requireSettings();
+      send({ message: 'Checking for updates…' });
+      const offered = await checkAvailableRelease(feedUrl, { accessKey: accessKey() });
+      const record = await readInstalledRecord(installDir);
+      const plan = playPlan({ offered, record });
+      let release;
+      let offline = false;
+      if (plan === 'offline') {
+        await log(`Play: could not check for updates (${offered.status}: ${offered.message}); starting the installed client.`);
+        release = lastVerified?.installDir === installDir ? lastVerified.release : null;
+        const launchInfo = release?.launch ?? record?.launch ?? { executable: config.clientExecutable || 'SlumsMS.exe', args: [] };
+        if (!(await exists(path.resolve(installDir, ...launchInfo.executable.split('/'))))) {
+          throw new Error(`Couldn't check for updates (${offered.message}) and the game is not installed in this folder yet.`);
+        }
+        release = { launch: launchInfo };
+        offline = true;
+        send({ available: { status: offered.status } });
+      } else {
+        send({ available: { status: 'ok', version: offered.version, layers: offered.layers } });
+        if (plan === 'update') {
+          await log(`Play: ${offered.version} is out (installed: ${record?.release ?? 'unknown'}); updating before launch.`);
+          release = await installFiles('fast', `Updating to ${offered.version} before starting the game…`);
+        } else {
+          release = await recentlyVerified().catch(() => null);
+          if (!release) {
+            const checked = await checkRelease();
+            release = checked.pending.files.length ? await installFiles('fast', 'Repairing changed files before starting the game…') : checked.release;
+          }
+        }
       }
       await flushPendingGameOptions();
       send({ phase: 'launching', message: 'Starting the client. Accept its Windows prompt if shown.', canPlay: false });
       lastVerified = null;
       await launch(release);
-      send({ phase: 'ready', message: 'Client process started.', canPlay: true });
+      send({ phase: 'ready', canPlay: true, offlinePlay: offline,
+        message: offline ? 'Couldn’t check for updates. Started the installed version.' : 'Client process started.' });
     }));
     handle('gameOptions', async () => { await flushPendingGameOptions(); return gameOptionsState(); });
     handle('saveGameOptions', changes => saveGameOptions(validateChanges(changes)));

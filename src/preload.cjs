@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('launcher', {
   clearAccessKey: invoke('clearAccessKey'),
   chooseFolder: invoke('chooseFolder'),
   openFolder: invoke('openFolder'),
+  resetFolder: invoke('resetFolder'),
   check: invoke('check'),
   update: invoke('update'),
   repair: invoke('repair'),
