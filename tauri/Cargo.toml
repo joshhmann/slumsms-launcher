@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["core", "app"]
+
+[workspace.package]
+version = "1.5.0"
+edition = "2021"
+license = "UNLICENSED"
+
+[profile.release]
+# Small single exe: optimise for size, strip symbols, abort on panic.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

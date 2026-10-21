@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- The Content-Security-Policy is set by Tauri (tauri.conf.json app.security.csp) so the IPC channel is allowed. -->
+    <meta name="color-scheme" content="dark">
+    <title>SlumsMS Launcher</title>
+    <link rel="stylesheet" href="./style.css">
+    <script src="./bridge.js"></script>
+    <script type="module" src="./renderer.mjs"></script>
+  </head>
+  <body>
+    <header class="scene">
+      <div class="scene-art" aria-hidden="true">
+        <video class="scene-video" src="./assets/henesys.webm" poster="./assets/henesys.png" autoplay muted loop playsinline disablepictureinpicture></video>
+      </div>
+      <div class="masthead">
+        <div class="brand">
+          <span class="brand-leaf" aria-hidden="true"></span>
+          <div><p class="brand-name">SlumsMS</p><p class="brand-caption">GAME LAUNCHER</p></div>
+        </div>
+        <div class="masthead-actions">
+          <span class="phase-badge" id="phase-badge" data-phase="idle"><span class="status-dot" aria-hidden="true"></span><span id="phase-label">Starting</span></span>
+          <button class="text-button" id="open-options" type="button" aria-haspopup="dialog" aria-controls="options-dialog"><span class="options-mark" aria-hidden="true"></span>Game options</button>
+          <button class="icon-button" id="open-settings" type="button" aria-haspopup="dialog" aria-controls="settings-dialog" title="Settings"><span class="gear" aria-hidden="true"></span><span class="sr-only">Settings</span></button>
+        </div>
+      </div>
+    </header>
+
+    <div class="launcher">
+      <main>
+        <section class="news window" id="news" aria-labelledby="news-heading" hidden>
+          <h2 class="window-tab" id="news-heading">LATEST UPDATES</h2>
+          <ol class="news-list" id="news-list"></ol>
+        </section>
+
+        <section class="client-card window" aria-labelledby="status-heading">
+          <p class="window-tab" aria-hidden="true">STATUS</p>
+          <div class="client-copy">
+            <p class="eyebrow" id="status-eyebrow">YOUR NEXT ADVENTURE</p>
+            <h1 id="status-heading">Make yourself at home.</h1>
+            <p class="status-message" id="status-message" role="status" aria-live="polite" aria-atomic="true">Loading launcher settings…</p>
+            <p class="install-target" id="install-target" hidden>Installing to <span class="install-target-path" id="install-target-path"></span> <button class="link-button" id="change-folder-inline" type="button">Change</button></p>
+          </div>
+          <div class="release-detail" id="release-detail" data-kind="checking">
+            <div class="release-row"><span class="detail-label">INSTALLED</span><span class="release-value" id="installed-version">Unknown</span></div>
+            <div class="release-row"><span class="detail-label">AVAILABLE</span><span class="release-value" id="available-version">Checking…</span></div>
+            <div class="release-row"><span class="detail-label">CHANNEL</span><span class="release-value channel-value"><span id="channel-name">Live</span><select class="channel-select" id="channel-select" aria-label="Channel" hidden></select></span></div>
+            <span class="release-note" id="release-note" hidden></span>
+          </div>
+        </section>
+
+        <section class="action-bar" aria-label="Client actions">
+          <div class="action-status">
+            <div class="progress-area" id="progress-area" hidden>
+              <div class="progress-caption"><span id="progress-label">Working…</span><span id="progress-detail"></span></div>
+              <progress id="operation-progress" max="1" aria-labelledby="progress-label"></progress>
+            </div>
+            <p class="action-help" id="action-help">Starting…</p>
+          </div>
+          <button class="button button-play" id="play" type="button" disabled><span id="play-label">Play</span><span class="play-arrow" aria-hidden="true">▶</span></button>
+        </section>
+        <p class="error-message" id="error-message" role="alert" hidden></p>
+      </main>
+
+      <footer><span class="footer-mark" aria-hidden="true"></span><span>Checks verify your files. Updates download only what needs to change.</span></footer>
+    </div>
+
+    <dialog class="settings-dialog" id="settings-dialog" aria-labelledby="settings-heading">
+      <div class="dialog-head">
+        <h2 id="settings-heading">SETTINGS</h2>
+        <button class="icon-button icon-button-small" id="close-settings" type="button" title="Close"><span aria-hidden="true">✕</span><span class="sr-only">Close settings</span></button>
+      </div>
+      <div class="dialog-body">
+        <section class="setting" aria-labelledby="folder-label">
+          <h3 id="folder-label">Game folder</h3>
+          <p class="folder-path" id="install-dir">No folder selected</p>
+          <p class="field-help" id="folder-source"></p>
+          <div class="button-row">
+            <button class="button button-secondary" id="choose-folder" type="button">Change folder</button>
+            <button class="button button-quiet" id="open-folder" type="button">Open folder</button>
+            <button class="button button-quiet" id="reset-folder" type="button" disabled>Use default folder</button>
+          </div>
+        </section>
+        <section class="setting" aria-labelledby="access-key-label">
+          <form id="access-key-form">
+            <label id="access-key-label" for="access-key">Access key</label>
+            <p class="field-help" id="access-key-help">Only needed if the update server asks for one.</p>
+            <div class="input-row">
+              <input id="access-key" name="access-key" type="password" placeholder="Enter access key" aria-describedby="access-key-help" autocomplete="off" autocapitalize="off" spellcheck="false" disabled>
+              <button class="button button-secondary" id="save-access-key" type="submit" disabled>Save</button>
+            </div>
+            <button class="link-button" id="clear-access-key" type="button" hidden>Clear saved key</button>
+          </form>
+        </section>
+        <section class="setting" aria-labelledby="repair-label">
+          <h3 id="repair-label">Repair</h3>
+          <p class="field-help">Re-check every game file and download anything missing or damaged.</p>
+          <button class="button button-secondary" id="repair-files" type="button">Verify and repair</button>
+        </section>
+        <details class="setting advanced">
+          <summary>Advanced</summary>
+          <form id="feed-form">
+            <label for="feed-url">Update server</label>
+            <p class="field-help" id="feed-help">Only change this if your server staff gave you a different manifest URL.</p>
+            <div class="input-row">
+              <input id="feed-url" name="feed-url" type="url" inputmode="url" placeholder="https://slumspatch.asslorde.com/manifest.json" aria-describedby="feed-help feed-notice" autocomplete="off" autocapitalize="off" spellcheck="false" required disabled>
+              <button class="button button-secondary" id="save-feed" type="submit" disabled>Save</button>
+            </div>
+            <p class="field-notice" id="feed-notice" aria-live="polite"></p>
+            <button class="link-button" id="reset-feed" type="button" hidden>Reset to default</button>
+          </form>
+        </details>
+        <p class="error-message" id="settings-error" role="alert" hidden></p>
+        <p class="dialog-foot" id="version-info"></p>
+      </div>
+    </dialog>
+
+    <dialog class="settings-dialog question-dialog" id="question-dialog" aria-labelledby="question-heading">
+      <div class="dialog-head">
+        <h2 id="question-heading">YOUR GAME FOLDER</h2>
+      </div>
+      <div class="dialog-body">
+        <p class="question-text" id="question-text"></p>
+        <p class="field-help">Nothing is moved, copied or downloaded again. You can change any channel's folder later in Settings.</p>
+        <div class="button-row">
+          <button class="button button-secondary" id="question-suggested" type="button">Use it</button>
+          <button class="button button-quiet" id="question-live" type="button">Use it as Live</button>
+          <button class="button button-quiet" id="question-skip" type="button">Not now</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="settings-dialog options-dialog" id="options-dialog" aria-labelledby="options-heading">
+      <div class="dialog-head">
+        <h2 id="options-heading">GAME OPTIONS</h2>
+        <button class="icon-button icon-button-small" id="close-options" type="button" title="Close"><span aria-hidden="true">✕</span><span class="sr-only">Close game options</span></button>
+      </div>
+      <div class="dialog-body">
+        <p class="options-intro">Saved to config.ini in your game folder. The game reads it when it starts.</p>
+        <p class="options-notice" id="options-notice" role="status" aria-live="polite" hidden></p>
+        <form id="options-form" class="options-form"></form>
+        <section class="setting options-note" aria-labelledby="screen-size-label">
+          <h3 id="screen-size-label">Screen size</h3>
+          <p class="field-help">Pick it in the game: Menu, System Options, Resolution (800 x 600 up to 1920 x 1080).</p>
+        </section>
+        <div class="options-foot">
+          <button class="button button-quiet" id="restore-options" type="button">Restore defaults</button>
+          <span class="saved-hint" id="options-saved" role="status" aria-live="polite"></span>
+        </div>
+      </div>
+    </dialog>
+  </body>
+</html>

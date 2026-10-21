@@ -1,0 +1,33 @@
+[package]
+name = "slums-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SlumsMS launcher core: feed protocol, verified installs, packs, game options, channels, settings"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: state.json mtimes must read back bit-exact (fast verify compares them).
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+url = "2"
+unicode-normalization = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
+tokio-util = "0.7"
+futures-util = "0.3"
+bytes = "1"
+fastrand = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }
+
+# Linux/macOS builds are for the test suite and the dev CLI: loopback HTTP only, no TLS stack.
+[target.'cfg(not(windows))'.dependencies]
+reqwest = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "net", "io-util"] }

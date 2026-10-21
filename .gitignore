@@ -2,3 +2,5 @@ node_modules/
 dist/
 releases/
 *.log
+tauri/target/
+tauri/app/gen/
