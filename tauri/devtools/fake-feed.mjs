@@ -2,7 +2,7 @@
 /**
  * A local fake patch server for developing and testing the launcher (never a real feed).
  *
- *   node tauri/devtools/fake-feed.mjs build OUT_DIR [--files N] [--version 1.0.0]
+ *   node tauri/devtools/fake-feed.mjs build OUT_DIR [--files N] [--version 1.0.0] [--exe-from PROGRAM.exe]
  *       Builds Live, Test and RC channels with the real publisher (tools/publish.mjs): a "base" layer
  *       of N synthetic Data files with first-install packs, and a small "client" layer with
  *       SlumsMS.exe, slums.dll and config.ini. Test/RC get their own client layer and manifest.
@@ -47,8 +47,11 @@ function syntheticBase(count) {
   return files;
 }
 
+// --exe-from PATH ships a real program as SlumsMS.exe so Play can be exercised (e.g. rundll32.exe,
+// which exits at once without a window when started without arguments).
+let exeFrom = null;
 const clientFiles = (label) => ({
-  'SlumsMS.exe': Buffer.from(`fake SlumsMS starter (${label})`),
+  'SlumsMS.exe': exeFrom ?? Buffer.from(`fake SlumsMS starter (${label})`),
   'slums.dll': Buffer.from(`fake slums.dll (${label})`),
   'config.ini': Buffer.from('[config]\r\nhost=127.0.0.1\r\nport=8484\r\n\r\n[clienthax]\r\nmoveattack=true ; legacy switch\r\nnobulb=true\r\n\r\n[discord]\r\nenableactivitystatus=true\r\n'),
 });
@@ -108,6 +111,7 @@ function serve(root, port) {
 }
 
 const [command, dir, ...rest] = process.argv.slice(2);
+if (option(rest, '--exe-from')) exeFrom = await fs.readFile(option(rest, '--exe-from'));
 if (command === 'build' && dir) await build(path.resolve(dir), { count: Number(option(rest, '--files', '300')), version: option(rest, '--version', '1.0.0') });
 else if (command === 'serve' && dir) serve(path.resolve(dir), Number(option(rest, '--port', '8787')));
 else { console.error('usage: fake-feed.mjs build OUT_DIR [--files N] [--version V] | serve OUT_DIR [--port P]'); process.exit(2); }

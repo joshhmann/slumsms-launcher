@@ -34,7 +34,8 @@ type Cmd<T> = Result<T, String>;
 pub struct Args {
     pub version: bool,
     pub self_test: Option<PathBuf>,
-    pub self_test_install: bool,
+    /// Steps a self-test runs after the page's first check: install, repair, play, options, channel:ID.
+    pub self_test_steps: Vec<String>,
     pub self_updated: Option<String>,
     pub self_update_failed: Option<String>,
     pub handover_from: Option<String>,
@@ -51,7 +52,13 @@ impl Args {
         Args {
             version: list.iter().any(|a| a == "--version" || a == "-V"),
             self_test: value("--self-test=").map(PathBuf::from),
-            self_test_install: list.iter().any(|a| a == "--self-test-install"),
+            self_test_steps: {
+                let mut steps: Vec<String> = value("--self-test-steps=").map(|v| v.split(',').map(str::to_string).collect()).unwrap_or_default();
+                if list.iter().any(|a| a == "--self-test-install") {
+                    steps.insert(0, "install".into());
+                }
+                steps
+            },
             self_updated: value("--self-updated="),
             self_update_failed: value("--self-update-failed="),
             handover_from: value("--handover-from="),
@@ -87,6 +94,7 @@ struct Inner {
     skip_version: Option<String>,
     page_ready_ms: Option<u128>,
     first_check_ms: Option<u128>,
+    self_test_started: bool,
 }
 
 struct Effective {
@@ -198,7 +206,7 @@ impl Launcher {
             legacy_file,
             log_file,
             exe,
-            inner: Mutex::new(Inner { settings, probes: Probes::new(), state, last_verified: None, self_update_checked: false, skip_version: None, page_ready_ms: None, first_check_ms: None }),
+            inner: Mutex::new(Inner { settings, probes: Probes::new(), state, last_verified: None, self_update_checked: false, skip_version: None, page_ready_ms: None, first_check_ms: None, self_test_started: false }),
             busy: AtomicBool::new(false),
             quitting: AtomicBool::new(false),
             install_cancel: Mutex::new(None),
@@ -389,7 +397,8 @@ impl Launcher {
                 }
             }
         }
-        let live_feed = self.config.feed_url.clone();
+        // A --feed-url override (development) stands in for the built-in Live feed.
+        let live_feed = self.args.feed_url.clone().unwrap_or_else(|| self.config.feed_url.clone());
         let key = legacy.get("accessKey").and_then(Value::as_str).unwrap_or("").to_string();
         let (probes, user) = probe_channels(&live_feed, &key, ACCESS_KEY_USER).await;
         let dir = legacy.get("installDir").and_then(Value::as_str).unwrap_or("").to_string();
@@ -405,6 +414,14 @@ impl Launcher {
         }
         self.log(&format!("Settings: migrated from the Electron launcher ({}), channel {}.", self.legacy_file.as_ref().map(|f| f.display().to_string()).unwrap_or_default(), settings.channel.id()));
         self.persist(&settings);
+        // Development overrides apply on top, as they do on every start.
+        if let Some(feed) = &self.args.feed_url {
+            settings.feed_url = feed.clone();
+        }
+        if let Some(dir) = &self.args.install_dir {
+            settings.folders.live = dir.clone();
+            settings.channel = Channel::Live;
+        }
         let mut inner = self.inner.lock().unwrap();
         inner.settings = settings;
         inner.probes = probes;
@@ -881,15 +898,103 @@ impl Launcher {
         true
     }
 
-    /// Self-test: report start-up time and the first check, then exit.
-    fn finish_self_test(&self, error: Option<String>) {
-        let Some(report) = &self.args.self_test else { return };
-        let (state, page_ready, first_check) = {
-            let mut inner = self.inner.lock().unwrap();
-            inner.first_check_ms = Some(self.started.elapsed().as_millis());
-            (Value::Object(inner.state.clone()), inner.page_ready_ms, inner.first_check_ms)
+    /// One self-test step through the same code paths the buttons use.
+    async fn self_test_step(self: &Arc<Self>, step: &str) -> Value {
+        let started = Instant::now();
+        let result: Result<Value, String> = match step {
+            "install" | "repair" => {
+                let mode = if step == "repair" { Mode::Full } else { Mode::Fast };
+                match self.begin("updating") {
+                    Err(e) => Err(e),
+                    Ok(()) => {
+                        let r = self.install_files(mode, None).await.map(|release| json!({ "release": release.version }));
+                        self.end(r)
+                    }
+                }
+            }
+            "play" => match self.begin("checking") {
+                Err(e) => Err(e),
+                Ok(()) => {
+                    let r = self.play_flow().await.map(|_| json!({}));
+                    self.end(r)
+                }
+            },
+            "options" => async {
+                // Read, change one switch, read the file back, then restore the original bytes.
+                let dir = self.effective().install_dir;
+                let path = Path::new(&dir).join("config.ini");
+                let before = std::fs::read(&path).map_err(|e| format!("config.ini: {e}"))?;
+                let shown = self.game_options_state(json!({}))?;
+                let flipped = !shown["values"]["attackwalk"].as_bool().unwrap_or(false);
+                let saved = self.save_game_options([("attackwalk".to_string(), flipped)].into_iter().collect()).await?;
+                let after = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                std::fs::write(&path, &before).map_err(|e| e.to_string())?;
+                Ok(json!({ "running": shown["running"], "saved": saved["saved"], "attackwalk": saved["values"]["attackwalk"], "configAfter": after }))
+            }
+            .await,
+            other => match other.strip_prefix("channel:").and_then(Channel::parse) {
+                None => Err(format!("unknown self-test step {other}")),
+                Some(channel) => {
+                    let switched = set_channel_inner(self, channel).await;
+                    match switched {
+                        Err(e) => Err(e),
+                        Ok(_) => match self.begin("checking") {
+                            Err(e) => Err(e),
+                            Ok(()) => {
+                                let r = self.check_release(Mode::Fast).await.map(|(release, pending)| json!({ "release": release.version, "pendingFiles": pending.pending_files }));
+                                self.end(r)
+                            }
+                        },
+                    }
+                }
+            },
         };
+        let state = Value::Object(self.inner.lock().unwrap().state.clone());
+        json!({ "step": step, "ok": result.is_ok(), "ms": started.elapsed().as_millis(), "result": result.as_ref().ok(), "error": result.as_ref().err(),
+            "phase": state.get("phase"), "message": state.get("message"), "channel": state.get("channel"), "installDir": state.get("installDir") })
+    }
+
+    /// Self-test: after the page's first check, run the requested steps, report, exit.
+    async fn run_self_test(self: Arc<Self>, first: Result<(), String>) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.self_test_started {
+                return;
+            }
+            inner.self_test_started = true;
+            inner.first_check_ms = Some(self.started.elapsed().as_millis());
+        }
+        let mut steps = Vec::new();
+        if first.is_ok() {
+            for step in self.args.self_test_steps.clone() {
+                if step == "install" && self.inner.lock().unwrap().state.get("phase").and_then(Value::as_str) != Some("needs-update") {
+                    continue;
+                }
+                let outcome = self.self_test_step(&step).await;
+                let ok = outcome["ok"].as_bool().unwrap_or(false);
+                steps.push(outcome);
+                if !ok {
+                    break;
+                }
+            }
+        }
+        let failed = steps.iter().find(|s| !s["ok"].as_bool().unwrap_or(false)).and_then(|s| s["error"].as_str().map(str::to_string));
+        self.finish_self_test(first.err().or(failed), steps);
+    }
+
+    /// Self-test: report start-up time, the first check and the steps, then exit.
+    fn finish_self_test(&self, error: Option<String>, steps: Vec<Value>) {
+        let Some(report) = &self.args.self_test else { return };
+        let (state, page_ready, first_check, mut settings) = {
+            let inner = self.inner.lock().unwrap();
+            (Value::Object(inner.state.clone()), inner.page_ready_ms, inner.first_check_ms, serde_json::to_value(&inner.settings).unwrap_or_default())
+        };
+        // Whether a key is saved, never the key.
+        settings["accessKey"] = json!(if settings["accessKey"].as_str().unwrap_or("").is_empty() { "" } else { "(saved)" });
         let value = json!({
+            "steps": steps,
+            "settings": settings,
+            "migrationQuestion": state.get("migrationQuestion"),
             "ok": error.is_none(),
             "version": VERSION,
             "exe": self.exe.display().to_string(),
@@ -906,6 +1011,8 @@ impl Launcher {
             "installDir": state.get("installDir"),
             "feedUrl": state.get("feedUrl"),
             "pendingFiles": state.get("pendingFiles"),
+            "showChannelPicker": state.get("showChannelPicker"),
+            "channelLabel": state.get("channelLabel"),
         });
         let _ = std::fs::write(report, serde_json::to_vec_pretty(&value).unwrap_or_default());
         self.app.exit(0);
@@ -1086,12 +1193,7 @@ pub async fn check(launcher: L<'_>) -> Cmd<()> {
     .await;
     let outcome = l.end(result);
     if l.args.self_test.is_some() {
-        if l.args.self_test_install && outcome.is_ok() && l.inner.lock().unwrap().state.get("phase").and_then(Value::as_str) == Some("needs-update") {
-            let result = update(launcher).await;
-            l.finish_self_test(result.err());
-        } else {
-            l.finish_self_test(outcome.clone().err());
-        }
+        tauri::async_runtime::spawn(l.clone().run_self_test(outcome.clone()));
     }
     outcome
 }
@@ -1140,9 +1242,13 @@ pub async fn reset_game_options(launcher: L<'_>) -> Cmd<Value> {
 
 #[tauri::command]
 pub async fn set_channel(launcher: L<'_>, value: String) -> Cmd<Value> {
-    let l = launcher.inner().clone();
-    l.require_idle()?;
     let channel = Channel::parse(&value).ok_or("Unknown channel.")?;
+    set_channel_inner(launcher.inner(), channel).await
+}
+
+async fn set_channel_inner(l: &Arc<Launcher>, channel: Channel) -> Cmd<Value> {
+    let l = l.clone();
+    l.require_idle()?;
     let open = accessible_channels(&l.inner.lock().unwrap().probes);
     if !open.contains(&channel) {
         return Err(format!("The {} channel needs the developer access key.", label(channel)));
