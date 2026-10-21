@@ -180,6 +180,8 @@ After every successful install, update or repair the launcher writes `.slumsms-l
 
 Limit: an edit that keeps the same size **and** restores the same mtime is not seen by fast verify; only Repair catches it. Any ordinary tamper or corruption that changes size or mtime is caught on Play. The state file is a local cache, not a security boundary; deleting it just makes the next check hash everything.
 
+Verify less: after an install, update or check that left nothing pending, Play within 30 minutes skips the folder pass when the server still offers the same manifest (one small request); the first Play after the game has started does the fast stat pass again. Install no longer runs a second check after it finishes; it already verified every file it kept or wrote.
+
 Player-owned files (the release's `playerOwned` list; `config.ini` by default) are installed only when missing. An existing copy is never replaced, by Update or Repair, so a player's server address or settings survive releases. Delete it to get the release's default back.
 
 ## Downloads
@@ -190,14 +192,35 @@ Before downloading anything the launcher checks free disk space (the pending byt
 
 - A dropped or stalled connection (no data for 60 s) resumes the pack **at the exact byte** with an HTTP `Range` request, continuing the partial file and its hash. The retry budget (8 attempts, backoff capped at 30 s) refills whenever an attempt made progress, so a flaky home connection keeps going.
 - A pack that is missing, damaged (a file fails its SHA-256) or served with a wrong range is abandoned, and what it still owed is downloaded per file. A server without range support still works (it sends whole packs; skipped bytes are discarded).
-- Closing the launcher keeps every file that finished; the next Install continues with what is left (a file that was half downloaded starts again).
-- Progress shows bytes, files, speed and time left (measured over the last 20 s).
+- Closing the launcher keeps every file that finished; the next Install continues with what is left (a file that was half downloaded starts again). Quitting mid-install stops the download cleanly (up to 5 s) so the finished files are recorded. On the next start the status reads "Checked 8.2 GB already downloaded. ... left to download" and the button says **Continue install**; while it runs the line starts with "Checked 8.2 GB already downloaded, continuing." and the bar counts on from the kept bytes.
+- Progress is one steady line built from aggregate counters, never from whichever parallel pack or file reported last: "Downloading 12 of 91 packs, 3.4 of 21.7 GB, 45 MB/s, about 6 min left" (per-file downloads say "files"; speed and time left are measured over the last 20 s).
 
 **Per-file** downloads (default 12 in parallel) handle everything else. Transient failures (network errors, stalls, short bodies, HTTP 408/425/429/5xx) are retried up to 4 times with exponential backoff and jitter; a 4xx or a full-size SHA-256 mismatch fails immediately. Progress is throttled to about 10 updates a second; the file list itself never crosses into the page.
 
-Each file is downloaded into `.mapleroot-stage-*`, size- and SHA-256-verified, then moved into place. Files that did not exist yet are moved in as soon as they verify and recorded in the state (checkpointed every 15 s and on failure), so an interrupted first install resumes where it left off without re-downloading or re-hashing finished files. Files that replace existing ones are moved in only after every download in that run has verified. An interrupted per-file download restarts that file from zero. Staging folders older than an hour (left by a launcher that was killed) are removed at the next install.
+Each file is downloaded into `.mapleroot-stage-*`, size- and SHA-256-verified, then moved into place. Files that did not exist yet are moved in as soon as they verify and recorded in the state (checkpointed every 5 s and on failure), so an interrupted first install resumes where it left off without re-downloading or re-hashing finished files. Files that replace existing ones are moved in only after every download in that run has verified. An interrupted per-file download restarts that file from zero. Staging folders older than an hour (left by a launcher that was killed) are removed at the next install.
 
 Packs are not compressed: the Data .img files barely compress (~97% under xz), so compression would cost CPU on both ends for ~3-5%.
+
+## Game options
+
+The masthead's **Game options** button edits the switches the client reads from `config.ini` at start-up (`src/game-options.mjs` parses and edits the text, `src/game-config.mjs` reads and writes the file). Options, with the client's value when a key is absent:
+
+| Panel label | Key | Default |
+| --- | --- | --- |
+| Show your game on Discord | `[discord] enableactivitystatus` | on |
+| Allow the Windows key | `[clienthax] enablewinkey` | on |
+| Hide the quest lightbulb | `[clienthax] nobulb` | on |
+| Orange name and skill text | `[clienthax] customcolor` | on |
+| Keep walking while attacking | `[clienthax] attackwalk` | off |
+| Jump while attacking | `[clienthax] attackjump` | on |
+| Move while charging skills | `[clienthax] chargemove` | on |
+| Double-tap jump to Flash Jump | `[clienthax] doubletapjump` | on |
+| Shoot in mid-air | `[clienthax] jumpshoot` | on |
+| Cast magic in mid-air | `[clienthax] jumpmagic` | on |
+
+`moveattack` (MapleRoot's single switch) is read, never written or removed: without the new keys the panel shows what the client does with it (the slide stays off; jump and charge follow `moveattack`). Changing any of `attackwalk`/`attackjump`/`chargemove` writes all three. Not exposed: `[general] resolution` and `ChairOpacity`/`SkillOpacity` (the single-DLL client ignores them; resolution is chosen in-game in System Options), `[config]` host/port and `[debug]`.
+
+File safety: reading follows the client's inih parser (case-insensitive names, `;`/`#` comments, inline ` ;` comments, a repeated key makes the value unreadable). Edits replace only the value of an owned key (keeping its spelling, spacing and inline comment), drop repeats of that key, add a missing key at the end of its section or a missing section at the end of the file; every other byte (comments, order, unknown keys, CRLF, BOM, non-UTF-8 bytes) is kept, since the file is handled as latin1. Writes go to a temporary file beside it and are renamed over it. A missing `config.ini` is never created (it carries the server address; the install provides it). While `SlumsMS.exe` or `MapleStory.exe` is running, changes are kept in the launcher's settings and written when the panel is opened after the game closed, or at the next Play. A line the client cannot parse (which makes it ignore every option) is reported in the panel.
 
 ## Release news
 
@@ -267,4 +290,4 @@ Clone this repository on Windows, install Node22 or newer, then run `npm ci` and
 
 Pending requested change, **not implemented yet**: game-server IP/port in the Settings panel.
 
-Game-server address editing is not wired yet. A staged client outside this repository uses `config.ini` with `[config] host` and `port`; verify the actual desktop build's reader before implementing it. Ownership is now defined: `config.ini` is player-owned by default (installed once, never overwritten), so a saved address survives updates; the Settings editor itself still needs to preserve other INI fields. No production release feed or approved client package has been published.
+Game-server address editing is not wired yet (the Game options panel deliberately leaves `[config]` alone). A staged client outside this repository uses `config.ini` with `[config] host` and `port`; verify the actual desktop build's reader before implementing it. Ownership is now defined: `config.ini` is player-owned by default (installed once, never overwritten), so a saved address survives updates; the Settings editor itself still needs to preserve other INI fields. No production release feed or approved client package has been published.

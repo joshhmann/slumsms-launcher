@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { validatePackIndex, planPacks, rateMeter, DEFAULT_REQUEST_COST } from './packs.mjs';
+import { validatePackIndex, planPacks, rateMeter, downloadMessage, resumeMessage, DEFAULT_REQUEST_COST } from './packs.mjs';
 
 /** Launcher bookkeeping inside an installation; manifests may never write here. */
 export const STATE_DIRECTORY = '.slumsms-launcher';
@@ -16,7 +16,8 @@ const MAX_MANIFEST_BYTES = 128 * 1024 * 1024;
 const MAX_LAYERS = 16;
 export const DEFAULT_CONCURRENCY = 12;
 export const MAX_CONCURRENCY = 32;
-const STATE_CHECKPOINT_MS = 15_000;
+// Short, so a launcher killed mid-install (no time for its final save) re-hashes only a few seconds of files.
+const STATE_CHECKPOINT_MS = 5_000;
 
 const loaded = new WeakMap();
 const validated = new WeakSet();
@@ -739,13 +740,16 @@ async function inspect(root, release, onProgress, mode) {
     report(`Verified ${file.path}`, bytesDone, bytesTotal);
   });
   const files = release.files.filter((file) => pending.has(file.path));
+  const bytes = files.reduce((sum, file) => sum + file.size, 0);
   return {
-    files, bytes: files.reduce((sum, file) => sum + file.size, 0), hashed: toHash.length, verified, existing, installation,
+    files, bytes, hashed: toHash.length, verified, existing, installation,
+    // Bytes already in place and verified (or trusted by size and mtime): what a resumed install keeps.
+    keptBytes: release.files.reduce((sum, file) => sum + file.size, 0) - bytes,
     stateChanged: toHash.length > 0 || state.release !== release.version,
   };
 }
 
-/** Returns { files, bytes, hashed }: the files that need downloading and how many files were hashed. */
+/** Returns { files, bytes, hashed, keptBytes }: the files that need downloading, how many files were hashed, and the bytes already in place. */
 export async function inspectRelease(root, release, onProgress = () => {}, { mode = 'fast' } = {}) {
   const known = knownRelease(release);
   const result = await inspect(root, known, onProgress, mode);
@@ -756,7 +760,7 @@ export async function inspectRelease(root, release, onProgress = () => {}, { mod
   if (result.installation.exists && !result.files.length && loaded.has(known)) {
     try { await recordInstalled(result.installation.root, known); } catch { /* shown as Unknown until the next verify */ }
   }
-  return { files: result.files, bytes: result.bytes, hashed: result.hashed };
+  return { files: result.files, bytes: result.bytes, hashed: result.hashed, keptBytes: result.keptBytes };
 }
 
 const sleep = (ms, signal) => new Promise((resolve, reject) => {
@@ -1017,8 +1021,11 @@ export async function installRelease(root, release, onProgress = () => {}, optio
   if (!Number.isSafeInteger(packConcurrency) || packConcurrency < 1 || packConcurrency > MAX_CONCURRENCY) throw new Error(`Pack concurrency must be 1-${MAX_CONCURRENCY}.`);
   const { access, layerParts = [] } = loaded.get(release);
   const pending = await inspect(root, release, onProgress, mode);
-  const result = { files: pending.files, bytes: pending.bytes, hashed: pending.hashed, packs: 0 };
   const installation = await installationRoot(root, true);
+  // A folder that never finished installing (no installed.json yet) but already holds verified files
+  // is a resumed first install: say so, and count from what is there instead of from zero.
+  const resumed = pending.files.length > 0 && pending.keptBytes > 0 && !(await readInstalledRecord(installation.root));
+  const result = { files: pending.files, bytes: pending.bytes, hashed: pending.hashed, packs: 0, keptBytes: pending.keptBytes, resumed };
   const verified = pending.verified;
   const saveState = () => writeInstallState(installation.root, release, verified);
   if (!pending.files.length) {
@@ -1040,9 +1047,15 @@ export async function installRelease(root, release, onProgress = () => {}, optio
   let checkpoint = Promise.resolve();
   let complete = false;
   const meter = rateMeter();
+  const offset = resumed ? pending.keptBytes : 0;
+  // What is downloading now, counted in aggregate: parallel packs or files never fight over the line.
+  let phase = null;
   const progress = (message) => {
-    meter.add(bytesDone);
-    onProgress({ message, filesDone, filesTotal: pending.files.length, bytesDone, bytesTotal, ...meter.estimate(bytesTotal) });
+    meter.add(offset + bytesDone);
+    const estimate = meter.estimate(offset + bytesTotal);
+    const counts = { bytesDone: offset + bytesDone, bytesTotal: offset + bytesTotal, ...estimate };
+    const text = message ?? (phase ? downloadMessage({ ...phase, ...counts }) : 'Installing files…');
+    onProgress({ message: text, filesDone, filesTotal: pending.files.length, ...counts, resumed, keptBytes: pending.keptBytes });
   };
   async function commit(file, temporary) {
     const target = await destination(installation.root, file.path, true, cache);
@@ -1056,7 +1069,7 @@ export async function installRelease(root, release, onProgress = () => {}, optio
     if (pending.existing.has(file.path)) deferred.push({ file, temporary });
     else await commit(file, temporary);
     filesDone += 1;
-    progress(`Verified ${file.path}`);
+    progress();
     if (Date.now() - lastCheckpoint > STATE_CHECKPOINT_MS) {
       lastCheckpoint = Date.now();
       checkpoint = checkpoint.then(saveState, saveState);
@@ -1075,25 +1088,27 @@ export async function installRelease(root, release, onProgress = () => {}, optio
         await download(file, temporary, (count) => {
           received += count;
           bytesDone += count;
-          progress(`Downloading ${file.path}`);
+          progress();
         }, controller.signal, access, stallMs);
         break;
       } catch (error) {
         bytesDone -= received;
         await fs.rm(temporary, { force: true });
         if (controller.signal.aborted || error.permanent || attempt >= retries) throw error;
-        progress(`Retrying ${file.path}`);
+        progress(`${downloadMessage({ ...phase, bytesDone: offset + bytesDone, bytesTotal: offset + bytesTotal })} (retrying a file)`);
         await sleep(backoff(retryDelayMs, attempt), controller.signal);
       }
     }
     await place(file, temporary);
+    phase.done += 1;
   }
   let failure;
   const fail = (error) => { if (!failure) { failure = error; controller.abort(); } };
   try {
+    if (resumed) progress(resumeMessage(pending.keptBytes));
     let plan = { packs: [], files: pending.files, bytes: pending.bytes };
     if (options.packs !== false && pending.files.length >= PACK_MIN_FILES && layerParts.some((part) => part.packs)) {
-      progress('Planning the download…');
+      if (!resumed) progress('Planning the download…');
       const sources = await loadPackSources(layerParts, access, controller.signal, progress);
       if (sources.length) plan = planPacks(pending.files, sources);
     }
@@ -1101,7 +1116,8 @@ export async function installRelease(root, release, onProgress = () => {}, optio
     result.packs = plan.packs.length;
     const single = [...plan.files];
     if (plan.packs.length) {
-      progress(`Downloading ${plan.packs.length} pack${plan.packs.length === 1 ? '' : 's'}…`);
+      phase = { unit: 'packs', done: 0, total: plan.packs.length };
+      progress();
       await pool(plan.packs.length, packConcurrency, async (number) => {
         if (controller.signal.aborted) return;
         const { source, spans } = plan.packs[number];
@@ -1110,8 +1126,8 @@ export async function installRelease(root, release, onProgress = () => {}, optio
         let spanReceived = 0;
         const context = {
           stage, signal: controller.signal, access, retries: packRetries, retryDelayMs, stallMs,
-          onBytes: (count) => { spanReceived += count; bytesDone += count; progress(`Downloading pack ${number + 1} of ${plan.packs.length}`); },
-          onRetry: () => progress(`Connection lost; resuming pack ${number + 1}…`),
+          onBytes: (count) => { spanReceived += count; bytesDone += count; progress(); },
+          onRetry: () => progress(`${downloadMessage({ ...phase, bytesDone: offset + bytesDone, bytesTotal: offset + bytesTotal })} (connection lost, resuming)`),
           onFile: async (entry, temporary) => {
             const [first, ...copies] = entry.targets;
             // Identical files share one copy in the pack.
@@ -1137,12 +1153,13 @@ export async function installRelease(root, release, onProgress = () => {}, optio
           bytesTotal += owed.reduce((sum, file) => sum + file.size, 0) - unread;
           single.push(...owed);
           progress(`A pack could not be used (${error.message}); downloading its files one by one.`);
-        }
+        } finally { phase.done += 1; }
       });
       if (failure) throw failure;
     }
     if (single.length) {
-      progress('Downloading verified update files…');
+      phase = { unit: 'files', done: 0, total: single.length };
+      progress();
       await pool(single.length, concurrency, async (index) => {
         if (controller.signal.aborted) return;
         try { await transfer(single[index]); } catch (error) { fail(error); }
@@ -1153,7 +1170,7 @@ export async function installRelease(root, release, onProgress = () => {}, optio
     // No existing file is replaced until every download has passed verification.
     for (const { file, temporary } of deferred) {
       await commit(file, temporary);
-      progress(`Installed ${file.path}`);
+      progress('Installing updated files…');
     }
     await checkpoint.catch(() => {});
     await saveState();

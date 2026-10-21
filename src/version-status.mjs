@@ -60,3 +60,14 @@ export function formatTimeLeft(seconds) {
   if (minutes < 60) return `about ${minutes} min left`;
   return `about ${Math.floor(minutes / 60)} h ${minutes % 60} min left`;
 }
+
+/**
+ * Whether Play may reuse this session's last full check instead of walking the folder again:
+ * same folder and server, recent enough, the game executable still there, and the server still
+ * offering exactly the manifest that was verified. `offered` is checkAvailableRelease's answer.
+ */
+export function reuseVerified({ recent, installDir, feedUrl, now, maxAgeMs, executablePresent, offered }) {
+  if (!recent || recent.installDir !== installDir || recent.feedUrl !== feedUrl) return false;
+  if (!(now - recent.at >= 0 && now - recent.at <= maxAgeMs) || !executablePresent) return false;
+  return offered?.status === 'ok' && Boolean(recent.release?.manifestSha256) && offered.manifestSha256 === recent.release.manifestSha256;
+}

@@ -7,8 +7,11 @@ import path from 'node:path';
 import { createServer } from 'node:http';
 import { publishLayer, publishLayeredRelease, publishPacks } from '../tools/publish.mjs';
 import { loadRelease, installRelease, inspectRelease, readInstallState, validateManifest } from '../src/updater.mjs';
-import { groupPacks, planPacks, validatePackIndex, rateMeter } from '../src/packs.mjs';
-import { formatTimeLeft } from '../src/version-status.mjs';
+import { groupPacks, planPacks, validatePackIndex, rateMeter, downloadMessage, resumeMessage } from '../src/packs.mjs';
+import { formatTimeLeft, reuseVerified } from '../src/version-status.mjs';
+
+/** The fields every inspectRelease result has; keptBytes is checked where it matters. */
+const core = ({ files, bytes, hashed }) => ({ files, bytes, hashed });
 
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const PACK_SIZE = 4096;
@@ -230,7 +233,7 @@ test('a first install takes packs: few requests, every file verified, duplicates
   const state = await readInstallState(f.install);
   assert.equal(state.files.size, Object.keys(f.expected).length);
   // The next Play needs nothing and hashes nothing.
-  assert.deepEqual(await inspectRelease(f.install, await loadRelease(f.url, { installDir: f.install })), { files: [], bytes: 0, hashed: 0 });
+  assert.deepEqual(core(await inspectRelease(f.install, await loadRelease(f.url, { installDir: f.install }))), { files: [], bytes: 0, hashed: 0 });
 });
 
 test('a dropped connection resumes the pack at the exact byte with an HTTP Range request', async (t) => {
@@ -353,4 +356,74 @@ test('time left reads naturally', () => {
   assert.equal(formatTimeLeft(14 * 60), 'about 14 min left');
   assert.equal(formatTimeLeft(65 * 60), 'about 1 h 5 min left');
   assert.equal(formatTimeLeft(null), '');
+});
+
+test('downloadMessage is one steady line from aggregate counters', () => {
+  const GB = 1024 ** 3;
+  assert.equal(downloadMessage({ unit: 'packs', done: 11, total: 91, bytesDone: 3.4 * GB, bytesTotal: 21.7 * GB, bytesPerSecond: 45 * 1024 ** 2, etaSeconds: 370 }),
+    'Downloading 12 of 91 packs, 3.4 of 21.7 GB, 45 MB/s, about 6 min left');
+  assert.equal(downloadMessage({ unit: 'packs', done: 91, total: 91, bytesDone: 2 * GB, bytesTotal: GB }), 'Downloading 91 of 91 packs, 1.0 of 1.0 GB');
+  assert.equal(downloadMessage({ unit: 'files', done: 0, total: 1, bytesDone: 0, bytesTotal: 0 }), 'Downloading 1 of 1 file');
+  assert.equal(resumeMessage(8.2 * GB), 'Checked 8.2 GB already downloaded, continuing.');
+});
+
+test('parallel pack downloads report one steady, never-backwards progress line', async (t) => {
+  const f = await fixture(t);
+  const events = [];
+  await installRelease(f.install, await loadRelease(f.url), (value) => events.push(value), { packConcurrency: 4 });
+  await f.assertInstalled();
+  const packLines = events.map((event) => /^Downloading (\d+) of (\d+) packs/u.exec(event.message)).filter(Boolean);
+  assert.ok(packLines.length > 5, `${packLines.length} pack lines`);
+  assert.equal(new Set(packLines.map((match) => match[2])).size, 1, 'the pack total never changes');
+  for (let i = 1; i < packLines.length; i += 1) assert.ok(Number(packLines[i][1]) >= Number(packLines[i - 1][1]), 'the pack number never goes back');
+  // No per-pack or per-file chatter while packs download.
+  assert.ok(!events.some((event) => /^(Downloading pack |Verified |Downloading Data)/u.test(event.message)), events.map((event) => event.message).join('\n'));
+  const downloads = events.filter((event) => /^Downloading \d/u.test(event.message));
+  for (let i = 1; i < downloads.length; i += 1) {
+    assert.ok(downloads[i].bytesDone >= downloads[i - 1].bytesDone, 'bytes never go back');
+    assert.ok(downloads[i].bytesDone <= downloads[i].bytesTotal);
+  }
+  assert.ok(downloads.every((event) => event.resumed === false));
+});
+
+test('a resumed first install says what it kept and counts on from there', async (t) => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  await assert.rejects(installRelease(f.install, await loadRelease(f.url), (value) => {
+    if (value.filesDone >= 20) controller.abort(new Error('player closed the launcher'));
+  }, { signal: controller.signal, packConcurrency: 1 }), /closed the launcher/);
+  const release = await loadRelease(f.url, { installDir: f.install });
+  const pending = await inspectRelease(f.install, release);
+  assert.ok(pending.keptBytes > 0);
+  const total = release.files.reduce((sum, file) => sum + file.size, 0);
+  assert.equal(pending.keptBytes + pending.bytes, total);
+  const events = [];
+  const result = await installRelease(f.install, release, (value) => events.push(value), { packConcurrency: 1 });
+  await f.assertInstalled();
+  assert.equal(result.resumed, true);
+  assert.equal(result.keptBytes, pending.keptBytes);
+  const first = events.findIndex((event) => event.message.startsWith('Checked '));
+  assert.ok(first >= 0, events.map((event) => event.message).join('\n'));
+  assert.equal(events[first].message, resumeMessage(pending.keptBytes));
+  // The bar continues from what was kept instead of starting at zero.
+  const downloads = events.slice(first);
+  assert.ok(downloads.every((event) => event.bytesDone >= pending.keptBytes && event.resumed === true));
+  // A finished install is not a resume: a later update counts only its own bytes.
+  const again = await installRelease(f.install, await loadRelease(f.url, { installDir: f.install }));
+  assert.equal(again.resumed, false);
+});
+
+test('Play reuses a fresh verification only for the same folder, server and manifest', () => {
+  const release = { manifestSha256: 'a'.repeat(64) };
+  const recent = { release, installDir: 'C:/Games/SlumsMS', feedUrl: 'https://patch/manifest.json', at: 1_000 };
+  const base = { recent, installDir: recent.installDir, feedUrl: recent.feedUrl, now: 2_000, maxAgeMs: 60_000, executablePresent: true,
+    offered: { status: 'ok', manifestSha256: release.manifestSha256 } };
+  assert.equal(reuseVerified(base), true);
+  assert.equal(reuseVerified({ ...base, recent: null }), false);
+  assert.equal(reuseVerified({ ...base, installDir: 'D:/Other' }), false);
+  assert.equal(reuseVerified({ ...base, feedUrl: 'https://other/manifest.json' }), false);
+  assert.equal(reuseVerified({ ...base, now: 1_000 + 60_001 }), false);
+  assert.equal(reuseVerified({ ...base, executablePresent: false }), false);
+  assert.equal(reuseVerified({ ...base, offered: { status: 'ok', manifestSha256: 'b'.repeat(64) } }), false); // a new release is out
+  assert.equal(reuseVerified({ ...base, offered: { status: 'offline' } }), false);
 });

@@ -8,6 +8,9 @@ import { createServer } from 'node:http';
 import { publishLayer, publishLayeredRelease, publishRelease } from '../tools/publish.mjs';
 import { loadRelease, inspectRelease, installRelease, validateManifest, validateLayerManifest, mergeLayers, readInstallState } from '../src/updater.mjs';
 
+/** The fields every inspectRelease result has; keptBytes is checked where it matters. */
+const core = ({ files, bytes, hashed }) => ({ files, bytes, hashed });
+
 const sha = (text) => createHash('sha256').update(text).digest('hex');
 
 async function fixture(t) {
@@ -151,7 +154,7 @@ test('fast verify trusts unchanged size+mtime and hashes only changed or missing
   const target = path.join(f.install, 'Data/Mob/0100100.img');
 
   // Unchanged: nothing is hashed.
-  assert.deepEqual(await fast(), { files: [], bytes: 0, hashed: 0 });
+  assert.deepEqual(core(await fast()), { files: [], bytes: 0, hashed: 0 });
   const state = await readInstallState(f.install);
   const entry = state.files.get('Data/Mob/0100100.img');
   assert.equal(entry.sha256, sha('snail bytes'));
@@ -169,7 +172,7 @@ test('fast verify trusts unchanged size+mtime and hashes only changed or missing
   const later = new Date(Date.now() + 60_000);
   await utimes(target, later, later);
   result = await fast();
-  assert.deepEqual(result, { files: [], bytes: 0, hashed: 1 });
+  assert.deepEqual(core(result), { files: [], bytes: 0, hashed: 1 });
   assert.equal((await fast()).hashed, 0);
 
   // Same-size tamper that also changes mtime: hashed and caught.
@@ -236,7 +239,7 @@ test('schemaVersion 1 manifests still load, install and fast-verify', async (t) 
   assert.deepEqual(release.layers, []);
   await installRelease(f.install, release);
   assert.equal(await readFile(path.join(f.install, 'Data/Map/Map0.img'), 'utf8'), 'overlay map bytes');
-  assert.deepEqual(await inspectRelease(f.install, release), { files: [], bytes: 0, hashed: 0 });
+  assert.deepEqual(core(await inspectRelease(f.install, release)), { files: [], bytes: 0, hashed: 0 });
   // v1 has no player-owned files unless listed, so a changed config.ini is managed.
   await writeFile(path.join(f.install, 'config.ini'), 'edited!');
   assert.deepEqual((await inspectRelease(f.install, release)).files.map((file) => file.path), ['config.ini']);
@@ -294,7 +297,7 @@ test('first install downloads with bounded concurrency, retries transient failur
   const last = events.at(-1);
   assert.equal(last.bytesDone, last.bytesTotal);
   assert.equal(last.bytesTotal, release.files.reduce((sum, file) => sum + file.size, 0));
-  assert.ok(events.some((event) => /Retrying/.test(event.message)));
+  assert.ok(events.some((event) => /retrying a file/.test(event.message)));
   assert.ok(events.every((event) => !('files' in event)));
   // Permanent failures (404) are not retried and fail the install.
   const fresh = path.join(f.root, 'fresh');

@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld('launcher', {
   update: invoke('update'),
   repair: invoke('repair'),
   play: invoke('play'),
+  gameOptions: invoke('gameOptions'),
+  saveGameOptions: invoke('saveGameOptions'),
+  resetGameOptions: invoke('resetGameOptions'),
   onState(callback) {
     const listener = (_event, state) => callback(state);
     ipcRenderer.on('launcher:state', listener);

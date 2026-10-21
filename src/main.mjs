@@ -5,6 +5,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { loadRelease, inspectRelease, installRelease, loadLauncherChannel, readInstalledRecord, checkAvailableRelease } from './updater.mjs';
 import { launcherUpdateDecision, prepareLauncherUpdate, startLauncherSwap, cleanupLauncherUpdates, healthyMarker } from './self-update.mjs';
+import { reuseVerified } from './version-status.mjs';
+import { readGameConfig, writeGameConfig, gameRunning } from './game-config.mjs';
+import { DEFAULT_VALUES, validateChanges } from './game-options.mjs';
 import { readLauncherConfig, detectBundledClient, standaloneInstallDir, validateFeedUrl, validAccessKey, effectiveAccessKey } from './launcher-config.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -12,7 +15,7 @@ const page = pathToFileURL(path.join(here, 'index.html')).href;
 let window;
 // settings.json (per-user app data, never the game folder) holds only the player's overrides;
 // launcher.config.json supplies the defaults. The access key never leaves the main process.
-let settings = { feedUrl: '', installDir: '', accessKey: '' };
+let settings = { feedUrl: '', installDir: '', accessKey: '', pendingGameOptions: null };
 let config = { feedUrl: '', clientExecutable: '', downloadConcurrency: 12, accessKey: '' };
 let bundledDir = '';
 let busy = false;
@@ -84,20 +87,37 @@ function progress(value) {
   if (now - lastProgress < 100 && value.filesDone !== value.filesTotal) return;
   lastProgress = now;
   send({ message: value.message, filesDone: value.filesDone, filesTotal: value.filesTotal, bytesDone: value.bytesDone, bytesTotal: value.bytesTotal,
-    bytesPerSecond: value.bytesPerSecond ?? null, etaSeconds: value.etaSeconds ?? null });
+    bytesPerSecond: value.bytesPerSecond ?? null, etaSeconds: value.etaSeconds ?? null, resumed: Boolean(value.resumed) });
 }
 // mode 'fast' trusts files whose size and mtime match the install state; 'full' (Repair) hashes everything.
 async function checkRelease(mode = 'fast') {
   const { feedUrl, installDir } = requireSettings();
   const release = await loadRelease(feedUrl, { installDir, accessKey: accessKey() });
-  send({ version: release.version, news: release.news ?? [], available: availableFrom(release), message: 'Verifying installed client files.' });
+  send({ version: release.version, news: release.news ?? [], available: availableFrom(release), message: 'Checking installed game files.' });
   const fresh = !(await exists(path.resolve(installDir, ...release.launch.executable.split('/'))));
   const pending = await inspectRelease(installDir, release, progress, { mode });
   await refreshInstalled();
+  if (!pending.files.length) markVerified(release, installDir);
   send({ phase: pending.files.length ? 'needs-update' : 'ready', canPlay: !pending.files.length, fresh: fresh && pending.files.length > 0,
-    pendingFiles: pending.files.length, pendingBytes: pending.bytes,
+    pendingFiles: pending.files.length, pendingBytes: pending.bytes, keptBytes: pending.keptBytes,
     message: pending.files.length ? `${pending.files.length} files need installing or repair.` : 'All release files verified. Ready to play.' });
   return { release, pending };
+}
+// The release this session last verified with nothing pending. Play right after an install, a
+// check or a repair reuses it (when the server still offers the same manifest) instead of walking
+// every file again; it is spent once the game starts, so the next Play checks sizes and dates.
+const VERIFIED_REUSE_MS = 30 * 60_000;
+let lastVerified = null;
+function markVerified(release, installDir) {
+  lastVerified = { release, installDir, feedUrl: effective().feedUrl, at: Date.now() };
+}
+async function recentlyVerified() {
+  const { feedUrl, installDir } = effective();
+  const recent = lastVerified;
+  if (!recent || recent.installDir !== installDir || recent.feedUrl !== feedUrl) return null;
+  const executablePresent = await exists(path.resolve(installDir, ...recent.release.launch.executable.split('/')));
+  const offered = executablePresent ? await checkAvailableRelease(feedUrl, { accessKey: accessKey() }) : null;
+  return reuseVerified({ recent, installDir, feedUrl, now: Date.now(), maxAgeMs: VERIFIED_REUSE_MS, executablePresent, offered }) ? recent.release : null;
 }
 // Installed: what this game folder last fully verified as (.slumsms-launcher/installed.json, written by
 // the updater). Available: the server's top-level manifest only; never layer manifests or files.
@@ -200,6 +220,58 @@ async function selfUpdate() {
   } finally { clearInterval(watchdog); }
 }
 
+// Game options (config.ini). Writes are serialized; while the game runs, changes wait in
+// settings.json (per game folder) and are written when the game is closed and the panel is
+// opened again, or at the next Play.
+let installAbort = null;
+let gameOptionsQueue = Promise.resolve();
+const serialized = task => { const run = gameOptionsQueue.then(task, task); gameOptionsQueue = run.catch(() => {}); return run; };
+function readPending(value) {
+  if (!value || typeof value !== 'object' || typeof value.installDir !== 'string') return null;
+  try { return { installDir: value.installDir, changes: validateChanges(value.changes) }; } catch { return null; }
+}
+const pendingFor = installDir => settings.pendingGameOptions?.installDir === installDir ? settings.pendingGameOptions.changes : null;
+const isGameRunning = () => gameRunning();
+async function gameOptionsState(extra = {}) {
+  const { installDir } = effective();
+  const current = await readGameConfig(installDir);
+  const pending = pendingFor(installDir);
+  const running = await isGameRunning();
+  // Show what the game will use once the waiting changes are written.
+  const values = current.status === 'ok' && pending ? { ...current.values, ...pending } : current.values;
+  return { ...current, values, defaults: DEFAULT_VALUES, running, pending: Boolean(pending), ...extra };
+}
+function flushPendingGameOptions() {
+  return serialized(async () => {
+    const { installDir } = effective();
+    const pending = pendingFor(installDir);
+    if (!pending) return;
+    try {
+      await writeGameConfig(installDir, pending, { isGameRunning });
+      settings.pendingGameOptions = null; await persist();
+      await log('Game options: applied changes saved while the game was running.');
+    } catch (error) {
+      if (error.code === 'CONFIG_MISSING') { settings.pendingGameOptions = null; await persist(); }
+      if (error.code !== 'GAME_RUNNING') await log(`Game options: could not apply saved changes: ${error.message}`);
+    }
+  });
+}
+function saveGameOptions(changes) {
+  return serialized(async () => {
+    const { installDir } = effective();
+    try {
+      await writeGameConfig(installDir, { ...(pendingFor(installDir) ?? {}), ...changes }, { isGameRunning });
+      if (pendingFor(installDir)) { settings.pendingGameOptions = null; await persist(); }
+      return gameOptionsState({ saved: 'written' });
+    } catch (error) {
+      if (error.code !== 'GAME_RUNNING') throw error;
+      settings.pendingGameOptions = { installDir, changes: { ...(pendingFor(installDir) ?? {}), ...changes } };
+      await persist();
+      return gameOptionsState({ saved: 'pending' });
+    }
+  });
+}
+
 function handle(name, action) {
   ipcMain.handle(`launcher:${name}`, async (event, ...args) => {
     if (event.sender !== window.webContents || event.senderFrame?.url !== page) throw new Error('Untrusted launcher request.');
@@ -214,7 +286,7 @@ else {
     try {
       const saved = JSON.parse(await readFile(settingsFile(), 'utf8'));
       settings = { feedUrl: typeof saved.feedUrl === 'string' ? saved.feedUrl : '', installDir: typeof saved.installDir === 'string' ? saved.installDir : '',
-        accessKey: validAccessKey(saved.accessKey) ? saved.accessKey : '' };
+        accessKey: validAccessKey(saved.accessKey) ? saved.accessKey : '', pendingGameOptions: readPending(saved.pendingGameOptions) };
     } catch (error) { if (error.code !== 'ENOENT') state.message = `Could not read saved settings: ${error.message}`; }
     for (const [flag, key] of [['--feed-url=', 'feedUrl'], ['--install-dir=', 'installDir']]) {
       const value = process.argv.find(argument => argument.startsWith(flag));
@@ -228,10 +300,18 @@ else {
     if (app.isPackaged) bundledDir = await detectBundledClient(launcherDir, config.clientExecutable);
     window = new BrowserWindow({ width: 1060, height: 860, minWidth: 860, minHeight: 700, backgroundColor: '#16203a',
       webPreferences: { preload: path.join(here, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
+    let quitting = false;
     window.on('close', event => {
-      if (busy && dialog.showMessageBoxSync(window, { type: 'warning', title: 'File operation in progress',
-        message: 'Quit before this operation finishes?', detail: 'The next check will detect incomplete updates. Temporary staging files may remain.',
-        buttons: ['Keep working', 'Quit'], defaultId: 0, cancelId: 0 }) === 0) event.preventDefault();
+      if (!busy || quitting) return;
+      event.preventDefault();
+      if (dialog.showMessageBoxSync(window, { type: 'warning', title: 'File operation in progress',
+        message: 'Quit before this operation finishes?', detail: 'Everything already downloaded is kept. The next install checks it and continues from there.',
+        buttons: ['Keep working', 'Quit'], defaultId: 0, cancelId: 0 }) === 0) return;
+      // Stop the install cleanly so it records what it finished, then quit (at most a few seconds).
+      quitting = true;
+      installAbort?.abort(new Error('The launcher was closed.'));
+      const stopped = Date.now();
+      const wait = setInterval(() => { if (!busy || Date.now() - stopped > 5_000) { clearInterval(wait); app.exit(0); } }, 100);
     });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.on('will-navigate', event => event.preventDefault());
@@ -284,19 +364,36 @@ else {
     const install = mode => operation('updating', async () => {
       const { feedUrl, installDir } = requireSettings();
       const release = await loadRelease(feedUrl, { installDir, accessKey: accessKey() });
-      send({ version: release.version, news: release.news ?? [], available: availableFrom(release), message: mode === 'full' ? 'Verifying every file and repairing damage.' : 'Installing missing or changed files.' });
-      await installRelease(installDir, release, progress, { mode, concurrency: config.downloadConcurrency });
-      await checkRelease();
+      send({ version: release.version, news: release.news ?? [], available: availableFrom(release), message: mode === 'full' ? 'Verifying every file and repairing damage.' : 'Checking what is already installed.' });
+      installAbort = new AbortController();
+      try {
+        await installRelease(installDir, release, progress, { mode, concurrency: config.downloadConcurrency, signal: installAbort.signal });
+      } finally { installAbort = null; }
+      // installRelease verified every file it kept or wrote; no second pass over the folder.
+      markVerified(release, installDir);
+      await refreshInstalled();
+      send({ phase: 'ready', canPlay: true, fresh: false, pendingFiles: 0, pendingBytes: 0, message: 'All release files verified. Ready to play.' });
+      void flushPendingGameOptions();
     });
     handle('update', () => install('fast'));
     handle('repair', () => install('full'));
     handle('play', () => operation('checking', async () => {
-      const { release, pending } = await checkRelease();
-      if (pending.files.length) throw new Error('Install or repair the pending files before playing.');
+      requireSettings();
+      let release = await recentlyVerified().catch(() => null);
+      if (!release) {
+        const checked = await checkRelease();
+        if (checked.pending.files.length) throw new Error('Install or repair the pending files before playing.');
+        release = checked.release;
+      }
+      await flushPendingGameOptions();
       send({ phase: 'launching', message: 'Starting the client. Accept its Windows prompt if shown.', canPlay: false });
+      lastVerified = null;
       await launch(release);
       send({ phase: 'ready', message: 'Client process started.', canPlay: true });
     }));
+    handle('gameOptions', async () => { await flushPendingGameOptions(); return gameOptionsState(); });
+    handle('saveGameOptions', changes => saveGameOptions(validateChanges(changes)));
+    handle('resetGameOptions', () => saveGameOptions({ ...DEFAULT_VALUES }));
     await window.loadFile(path.join(here, 'index.html'));
     // Show installed vs available before the player acts, and notice a new release while the launcher sits open.
     void refreshVersions();

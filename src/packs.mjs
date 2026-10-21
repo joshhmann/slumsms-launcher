@@ -181,3 +181,35 @@ export function rateMeter({ windowMs = 20_000, now = () => Date.now() } = {}) {
     },
   };
 }
+
+const gb = (bytes) => `${(bytes / 1024 ** 3).toFixed(1)}`;
+function speed(bytesPerSecond) {
+  if (bytesPerSecond >= 1024 ** 3) return `${(bytesPerSecond / 1024 ** 3).toFixed(1)} GB/s`;
+  if (bytesPerSecond >= 1024 ** 2) return `${Math.round(bytesPerSecond / 1024 ** 2)} MB/s`;
+  return `${Math.max(1, Math.round(bytesPerSecond / 1024))} KB/s`;
+}
+function timeLeft(seconds) {
+  if (seconds < 60) return 'less than a minute left';
+  const minutes = Math.round(seconds / 60);
+  return minutes < 60 ? `about ${minutes} min left` : `about ${Math.floor(minutes / 60)} h ${minutes % 60} min left`;
+}
+
+/**
+ * One steady line for the whole download, built from aggregate counters only (never from whichever
+ * parallel pack or file reported last): "Downloading 12 of 91 packs, 3.4 of 21.7 GB, 45 MB/s, about 6 min left".
+ * `unit` is 'packs' or 'files'; `done` counts finished units, and the one shown is the next to finish.
+ */
+export function downloadMessage({ unit = 'packs', done = 0, total = 0, bytesDone = 0, bytesTotal = 0, bytesPerSecond = null, etaSeconds = null }) {
+  const parts = [`Downloading ${Math.min(done + 1, Math.max(total, 1)).toLocaleString('en-US')} of ${total.toLocaleString('en-US')} ${unit === 'files' ? (total === 1 ? 'file' : 'files') : (total === 1 ? 'pack' : 'packs')}`];
+  if (bytesTotal > 0) parts.push(`${gb(Math.min(bytesDone, bytesTotal))} of ${gb(bytesTotal)} GB`);
+  if (Number.isFinite(bytesPerSecond) && bytesPerSecond > 0) {
+    parts.push(speed(bytesPerSecond));
+    if (Number.isFinite(etaSeconds) && etaSeconds >= 0) parts.push(timeLeft(etaSeconds));
+  }
+  return parts.join(', ');
+}
+
+/** "Checked 8.2 GB already downloaded, continuing." for a resumed install. */
+export function resumeMessage(keptBytes) {
+  return `Checked ${gb(keptBytes)} GB already downloaded, continuing.`;
+}

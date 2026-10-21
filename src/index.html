@@ -21,6 +21,7 @@
         </div>
         <div class="masthead-actions">
           <span class="phase-badge" id="phase-badge" data-phase="idle"><span class="status-dot" aria-hidden="true"></span><span id="phase-label">Starting</span></span>
+          <button class="text-button" id="open-options" type="button" aria-haspopup="dialog" aria-controls="options-dialog"><span class="options-mark" aria-hidden="true"></span>Game options</button>
           <button class="icon-button" id="open-settings" type="button" aria-haspopup="dialog" aria-controls="settings-dialog" title="Settings"><span class="gear" aria-hidden="true"></span><span class="sr-only">Settings</span></button>
         </div>
       </div>
@@ -110,6 +111,26 @@
         </details>
         <p class="error-message" id="settings-error" role="alert" hidden></p>
         <p class="dialog-foot" id="version-info"></p>
+      </div>
+    </dialog>
+
+    <dialog class="settings-dialog options-dialog" id="options-dialog" aria-labelledby="options-heading">
+      <div class="dialog-head">
+        <h2 id="options-heading">GAME OPTIONS</h2>
+        <button class="icon-button icon-button-small" id="close-options" type="button" title="Close"><span aria-hidden="true">✕</span><span class="sr-only">Close game options</span></button>
+      </div>
+      <div class="dialog-body">
+        <p class="options-intro">Saved to config.ini in your game folder. The game reads it when it starts.</p>
+        <p class="options-notice" id="options-notice" role="status" aria-live="polite" hidden></p>
+        <form id="options-form" class="options-form"></form>
+        <section class="setting options-note" aria-labelledby="screen-size-label">
+          <h3 id="screen-size-label">Screen size</h3>
+          <p class="field-help">Pick it in the game: Menu, System Options, Resolution (800 x 600 up to 1920 x 1080).</p>
+        </section>
+        <div class="options-foot">
+          <button class="button button-quiet" id="restore-options" type="button">Restore defaults</button>
+          <span class="saved-hint" id="options-saved" role="status" aria-live="polite"></span>
+        </div>
       </div>
     </dialog>
   </body>
