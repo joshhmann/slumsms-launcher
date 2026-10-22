@@ -522,3 +522,45 @@ fn walk(dir: &Path) -> Vec<String> {
     }
     out
 }
+
+#[tokio::test]
+async fn metadata_without_an_explicit_timeout_cannot_stall_forever() {
+    use slums_core::http::{read_bytes, METADATA_TIMEOUT};
+    let server = serve(&[client_layer("1.0", b"exe")], "1.0").await;
+    server.put("packs.json", b"{\"packs\":[]}".to_vec());
+    server.hook(|_, _| Action::StallAfter(1));
+    let cancel = CancellationToken::new();
+    let access = access(&server, "");
+    let manifest = server.url("manifest.json");
+    let packs = server.url("packs.json");
+    let work = async {
+        let (release, index) = tokio::join!(
+            load_release(&manifest, None, &access, &cancel),
+            read_bytes(&packs, "pack index", Some(&access), &cancel, None),
+        );
+        for error in [release.unwrap_err(), index.unwrap_err()] {
+            assert!(error.network);
+            assert!(error.message.contains("timed out"), "{}", error.message);
+        }
+    };
+    tokio::time::timeout(METADATA_TIMEOUT + Duration::from_secs(3), work).await.expect("metadata reads need a default body timeout");
+}
+
+#[tokio::test]
+async fn normal_release_checks_can_be_cancelled_during_metadata_reads() {
+    let server = serve(&[client_layer("1.0", b"exe")], "1.0").await;
+    server.hook(|_, _| Action::StallAfter(1));
+    let cancel = CancellationToken::new();
+    let request_cancel = cancel.clone();
+    let feed = server.url("manifest.json");
+    let access = access(&server, "");
+    let task = tokio::spawn(async move { load_release(&feed, None, &access, &request_cancel).await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while server.log.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    cancel.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap().unwrap_err();
+    assert!(error.is(slums_core::error::ABORTED));
+}

@@ -9,6 +9,7 @@ pub mod game_config;
 pub mod game_options;
 pub mod http;
 pub mod install;
+pub mod instance;
 pub mod manifest;
 pub mod packs;
 pub mod play;

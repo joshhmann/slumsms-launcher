@@ -13,6 +13,7 @@ use url::Url;
 pub const ACCESS_KEY_USER: &str = "slums";
 pub const DEV_ACCESS_USER: &str = "slumsdev";
 pub const ACCESS_KEY_MESSAGE: &str = "This server needs an access key - enter it in Settings";
+pub const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_MANIFEST_BYTES: usize = 128 * 1024 * 1024;
 
 pub fn user_agent() -> String {
@@ -148,7 +149,8 @@ pub async fn request(input: &str, cancel: &CancellationToken, access: Option<&Fe
     Err(Error::permanent("Release request exceeded the redirect limit."))
 }
 
-/// Read a small JSON document (manifest, layer manifest, pack index) fully, with a size limit.
+/// Read a small JSON document with a size limit and a total request/body deadline.
+/// None uses METADATA_TIMEOUT; availability probes can supply a shorter deadline.
 pub async fn read_bytes(input: &str, label: &str, access: Option<&FeedAccess>, cancel: &CancellationToken, timeout: Option<Duration>) -> Result<(Vec<u8>, Url)> {
     let work = async {
         let (mut response, url) = request(input, cancel, access, &[]).await?;
@@ -170,12 +172,9 @@ pub async fn read_bytes(input: &str, label: &str, access: Option<&FeedAccess>, c
         }
         Ok((bytes, url))
     };
-    match timeout {
-        Some(limit) => tokio::time::timeout(limit, work).await.unwrap_or_else(|_| {
-            Err(Error { message: "Could not reach the update server (timed out).".into(), network: true, ..Default::default() })
-        }),
-        None => work.await,
-    }
+    tokio::time::timeout(timeout.unwrap_or(METADATA_TIMEOUT), work).await.unwrap_or_else(|_| {
+        Err(Error { message: "Could not reach the update server (timed out).".into(), network: true, ..Default::default() })
+    })
 }
 
 pub fn parse_json(bytes: &[u8], label: &str) -> Result<serde_json::Value> {

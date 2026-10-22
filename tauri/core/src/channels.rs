@@ -160,6 +160,21 @@ pub fn channel_install_dir(channel: Channel, saved: &Folders, bundled_dir: &str,
     format!("{}-{}", live.trim_end_matches(['\\', '/']), channel.id())
 }
 
+/// Validate a proposed folder change, including defaults that move with Live.
+/// Leave the saved folders untouched if any resulting channels would share a path.
+pub fn change_folder(saved: &mut Folders, channel: Channel, dir: String, bundled: &str, standalone: &str, windows: bool) -> Result<(), String> {
+    let mut proposed = saved.clone();
+    proposed.set(channel, dir);
+    let dirs: BTreeMap<Channel, String> = CHANNELS.into_iter().map(|c| (c, channel_install_dir(c, &proposed, bundled, standalone))).collect();
+    for c in CHANNELS {
+        if let Some(owner) = folder_owner(&dirs[&c], c, &dirs, windows) {
+            return Err(format!("The {} and {} channels would use the same game folder: {}. Each channel needs its own folder. Choose another folder before resetting or saving.", c.label(), owner.label(), dirs[&c]));
+        }
+    }
+    *saved = proposed;
+    Ok(())
+}
+
 fn folder_key(dir: &str, windows: bool) -> String {
     let trimmed = dir.trim_end_matches(['\\', '/']);
     if windows {
@@ -236,6 +251,29 @@ mod tests {
     }
     fn probes(list: &[(Channel, Available)]) -> Probes {
         list.iter().cloned().collect()
+    }
+
+    #[test]
+    fn resetting_folders_checks_every_resulting_default_before_saving() {
+        for other in [Channel::Test, Channel::Rc] {
+            for collision in ["C:\\Default", "C:\\Default-test", "C:\\Default-rc"] {
+                let mut folders = Folders::default();
+                folders.live = "D:\\Custom".into();
+                folders.set(other, collision.into());
+                let before = folders.clone();
+                let result = change_folder(&mut folders, Channel::Live, String::new(), "", "C:\\Default", true);
+                let conflicts = collision == "C:\\Default" || (other == Channel::Test && collision.ends_with("-rc")) || (other == Channel::Rc && collision.ends_with("-test"));
+                assert_eq!(result.is_err(), conflicts, "{other:?}: {collision}");
+                if conflicts {
+                    assert_eq!(folders, before);
+                    assert!(result.unwrap_err().contains("Each channel needs its own folder"));
+                }
+            }
+        }
+        let mut folders = Folders { live: "C:\\Game".into(), test: "D:\\Test".into(), rc: "c:/GAME-test/".into() };
+        let before = folders.clone();
+        assert!(change_folder(&mut folders, Channel::Test, String::new(), "", "C:\\Default", true).is_err());
+        assert_eq!(folders, before);
     }
 
     #[test]

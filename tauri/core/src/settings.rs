@@ -135,11 +135,27 @@ pub struct Migration {
     pub notes: Vec<String>,
 }
 
+/// Electron used the saved folder, then a bundled client, then its per-user default.
+pub fn legacy_install_dir(legacy: &Value, bundled: &str, standalone: &str) -> String {
+    let saved = legacy.get("installDir").and_then(Value::as_str).unwrap_or("");
+    [saved, bundled, standalone].into_iter().find(|d| !d.is_empty()).unwrap_or("").to_string()
+}
+
+/// Inspect Electron's effective folder before assigning ownership. This only reads
+/// the existing install; migration never moves, copies or removes game files.
+pub fn migrate_legacy_install(legacy: &Value, live_feed_url: &str, bundled: &str, standalone: &str, client_executable: &str, probes: &Probes) -> Migration {
+    let default_dir = legacy_install_dir(&Value::Null, bundled, standalone);
+    let dir = legacy_install_dir(legacy, bundled, standalone);
+    let record = if dir.is_empty() { None } else { crate::release::read_installed_record(&dir) };
+    let holds_game = !dir.is_empty() && (record.is_some() || Path::new(&dir).join(client_executable).is_file());
+    migrate_legacy_settings(legacy, live_feed_url, Some(LegacyFolder { holds_game, record: record.as_ref() }), probes, &default_dir)
+}
+
 /// Map the Electron settings ({ feedUrl, installDir, accessKey, pendingGameOptions }) onto
 /// per-channel settings. The old folder becomes Live's only when every signal says Live (it stays
 /// exactly where it is); otherwise the player is asked once. A folder without a game follows the
 /// old feed's channel silently (nothing is there to mix up).
-pub fn migrate_legacy_settings(legacy: &Value, live_feed_url: &str, folder: Option<LegacyFolder>, probes: &Probes) -> Migration {
+pub fn migrate_legacy_settings(legacy: &Value, live_feed_url: &str, folder: Option<LegacyFolder>, probes: &Probes, default_dir: &str) -> Migration {
     let feed = legacy.get("feedUrl").and_then(Value::as_str).unwrap_or("");
     let feed_channel = if feed.is_empty() { Some(Channel::Live) } else { channel_of_feed(feed, live_feed_url) };
     let mut settings = Settings {
@@ -150,7 +166,7 @@ pub fn migrate_legacy_settings(legacy: &Value, live_feed_url: &str, folder: Opti
         ..Default::default()
     };
     let mut notes = Vec::new();
-    let dir = legacy.get("installDir").and_then(Value::as_str).unwrap_or("").to_string();
+    let dir = legacy_install_dir(legacy, "", default_dir);
     let pending = legacy.get("pendingGameOptions").filter(|p| p.get("installDir").and_then(Value::as_str) == Some(dir.as_str())).and_then(|p| {
         crate::game_options::validate_changes(p.get("changes")?).ok().map(|changes| PendingGameOptions { install_dir: dir.clone(), changes })
     });
@@ -161,6 +177,9 @@ pub fn migrate_legacy_settings(legacy: &Value, live_feed_url: &str, folder: Opti
     let channel = feed_channel.unwrap_or(Channel::Live);
     let folder = folder.unwrap_or(LegacyFolder { holds_game: false, record: None });
     if !folder.holds_game {
+        if channel != Channel::Live && dir == default_dir {
+            settings.folders.live = format!("{}-live", dir.trim_end_matches(['\\', '/']));
+        }
         settings.folders.set(channel, dir.clone());
         notes.push(format!("Old game folder {dir} holds no game yet; it stays the {} folder.", channel.label()));
         return Migration { settings, question: None, notes };
@@ -172,6 +191,11 @@ pub fn migrate_legacy_settings(legacy: &Value, live_feed_url: &str, folder: Opti
         settings.pending_game_options = pending;
         notes.push(format!("Old game folder {dir} is the Live folder."));
         return Migration { settings, question: None, notes };
+    }
+    // The legacy default may hold Test/RC. Keep Live away even while the question is
+    // unanswered or declined; no files are moved and the old install stays in place.
+    if dir == default_dir {
+        settings.folders.live = format!("{}-live", dir.trim_end_matches(['\\', '/']));
     }
     let suggested = from_folder.unwrap_or(channel);
     let conflict = from_folder.is_some_and(|f| f != channel);
@@ -244,20 +268,80 @@ mod tests {
     }
 
     #[test]
+    fn migration_inspects_the_electron_default_and_leaves_existing_files_untouched() {
+        let root = std::env::temp_dir().join(format!("slums-migration-{}", uuid::Uuid::new_v4()));
+        let dir = root.join("SlumsMS");
+        let record_path = dir.join(crate::release::INSTALLED_FILE);
+        std::fs::create_dir_all(record_path.parent().unwrap()).unwrap();
+        std::fs::write(dir.join("SlumsMS.exe"), b"existing game").unwrap();
+        for release in ["1.5.0-test", "1.5.0-rc1"] {
+            let bytes = serde_json::to_vec(&json!({ "recordVersion": 1, "release": release, "layers": [] })).unwrap();
+            std::fs::write(&record_path, &bytes).unwrap();
+            let migration = migrate_legacy_install(&json!({ "installDir": "" }), LIVE, "", dir.to_str().unwrap(), "SlumsMS.exe", &Probes::new());
+            let q = migration.question.unwrap();
+            assert_eq!(q.dir, dir.to_str().unwrap());
+            assert_eq!(q.suggested, if release.contains("test") { Channel::Test } else { Channel::Rc });
+            assert_ne!(crate::channels::channel_install_dir(Channel::Live, &migration.settings.folders, "", dir.to_str().unwrap()), dir.to_str().unwrap());
+            assert_eq!(std::fs::read(&record_path).unwrap(), bytes);
+            assert_eq!(std::fs::read(dir.join("SlumsMS.exe")).unwrap(), b"existing game");
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "no alternate install created");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn empty_legacy_install_dir_preserves_test_and_rc_in_the_electron_default() {
+        let default = "C:\\Users\\Player\\AppData\\Local\\SlumsMS";
+        for channel in [Channel::Test, Channel::Rc] {
+            for saved in [json!({}), json!({ "installDir": "" })] {
+                assert_eq!(legacy_install_dir(&saved, "", default), default);
+                let record = rec(if channel == Channel::Test { "1.5.0-test" } else { "1.5.0-rc1" }, "X");
+                let migration = migrate_legacy_settings(&saved, LIVE, Some(LegacyFolder { holds_game: true, record: Some(&record) }), &Probes::new(), default);
+                let q = migration.question.unwrap();
+                assert_eq!(q.dir, default);
+                assert_eq!(q.suggested, channel);
+                let mut declined = migration.settings.clone();
+                apply_migration_answer(&mut declined, &q, None);
+                assert_ne!(crate::channels::channel_install_dir(Channel::Live, &declined.folders, "", default), default);
+                let mut settings = migration.settings;
+                assert_ne!(crate::channels::channel_install_dir(Channel::Live, &settings.folders, "", default), default);
+                apply_migration_answer(&mut settings, &q, Some(channel));
+                assert_eq!(settings.folders.get(channel), default);
+                let dirs = crate::channels::CHANNELS.into_iter().map(|c| (c, crate::channels::channel_install_dir(c, &settings.folders, "", default))).collect();
+                assert_eq!(crate::channels::folder_owner(default, channel, &dirs, true), None);
+            }
+        }
+        assert_eq!(legacy_install_dir(&json!({}), "D:\\Bundled", default), "D:\\Bundled");
+        assert_eq!(legacy_install_dir(&json!({ "installDir": "E:\\Chosen" }), "D:\\Bundled", default), "E:\\Chosen");
+    }
+
+    #[test]
+    fn an_empty_legacy_test_or_rc_default_is_reserved_for_its_channel() {
+        let default = "C:\\Default";
+        for channel in [Channel::Test, Channel::Rc] {
+            let legacy = json!({ "installDir": "", "feedUrl": crate::channels::channel_feed(LIVE, channel) });
+            let migration = migrate_legacy_settings(&legacy, LIVE, Some(LegacyFolder { holds_game: false, record: None }), &Probes::new(), default);
+            assert!(migration.question.is_none());
+            assert_eq!(migration.settings.folders.get(channel), default);
+            assert_ne!(crate::channels::channel_install_dir(Channel::Live, &migration.settings.folders, "", default), default);
+        }
+    }
+
+    #[test]
     fn the_default_appdata_install_and_a_custom_live_folder_stay_live() {
         let probes: Probes = [(Channel::Live, ok("1.4.1", "L"))].into_iter().collect();
-        let m = migrate_legacy_settings(&json!({ "feedUrl": LIVE, "accessKey": "k" }), LIVE, None, &probes);
+        let m = migrate_legacy_settings(&json!({ "feedUrl": LIVE, "accessKey": "k" }), LIVE, None, &probes, "");
         assert_eq!((m.settings.channel, m.settings.folders.live.as_str(), m.question.is_none(), m.settings.access_key.as_str()), (Channel::Live, "", true, "k"));
         let record = rec("1.4.1", "L");
-        let m = migrate_legacy_settings(&json!({ "feedUrl": LIVE, "installDir": "Z:\\MSv83\\testlauncherblehbleh", "pendingGameOptions": { "installDir": "Z:\\MSv83\\testlauncherblehbleh", "changes": { "nobulb": false } } }), LIVE, Some(LegacyFolder { holds_game: true, record: Some(&record) }), &probes);
+        let m = migrate_legacy_settings(&json!({ "feedUrl": LIVE, "installDir": "Z:\\MSv83\\testlauncherblehbleh", "pendingGameOptions": { "installDir": "Z:\\MSv83\\testlauncherblehbleh", "changes": { "nobulb": false } } }), LIVE, Some(LegacyFolder { holds_game: true, record: Some(&record) }), &probes, "");
         assert_eq!(m.settings.folders.live, "Z:\\MSv83\\testlauncherblehbleh", "the folder stays exactly where it is");
         assert!(m.question.is_none());
         assert_eq!(m.settings.pending_game_options.unwrap().changes.get("nobulb"), Some(&false));
         // An install the old launcher never recorded, on the live feed, is Live.
-        let m = migrate_legacy_settings(&json!({ "installDir": "E:\\Games\\SlumsMS" }), LIVE, Some(LegacyFolder { holds_game: true, record: None }), &probes);
+        let m = migrate_legacy_settings(&json!({ "installDir": "E:\\Games\\SlumsMS" }), LIVE, Some(LegacyFolder { holds_game: true, record: None }), &probes, "");
         assert_eq!(m.settings.folders.live, "E:\\Games\\SlumsMS");
         // A chosen folder without a game keeps the player's choice.
-        let m = migrate_legacy_settings(&json!({ "installDir": "E:\\empty" }), LIVE, Some(LegacyFolder { holds_game: false, record: None }), &probes);
+        let m = migrate_legacy_settings(&json!({ "installDir": "E:\\empty" }), LIVE, Some(LegacyFolder { holds_game: false, record: None }), &probes, "");
         assert_eq!(m.settings.folders.live, "E:\\empty");
     }
 
@@ -266,7 +350,7 @@ mod tests {
         let probes: Probes = [(Channel::Live, ok("1.4.1", "L")), (Channel::Test, ok("1.4.1-test", "T")), (Channel::Rc, ok("1.4.0", "R"))].into_iter().collect();
         let record = rec("1.4.1-test", "T");
         let legacy = json!({ "feedUrl": "https://slumspatch.asslorde.com/launcher-rc/manifest.json", "installDir": "Z:\\SlumsMS-test" });
-        let m = migrate_legacy_settings(&legacy, LIVE, Some(LegacyFolder { holds_game: true, record: Some(&record) }), &probes);
+        let m = migrate_legacy_settings(&legacy, LIVE, Some(LegacyFolder { holds_game: true, record: Some(&record) }), &probes, "");
         assert_eq!(m.settings.channel, Channel::Rc);
         assert_eq!(m.settings.folders.live, "");
         let q = m.question.unwrap();
@@ -284,7 +368,7 @@ mod tests {
     fn a_live_feed_folder_that_holds_an_rc_build_is_asked_about() {
         let probes: Probes = [(Channel::Live, ok("1.4.1", "L")), (Channel::Rc, ok("1.4.2-rc1", "R"))].into_iter().collect();
         let record = rec("1.4.2-rc1", "R");
-        let m = migrate_legacy_settings(&json!({ "installDir": "D:\\G" }), LIVE, Some(LegacyFolder { holds_game: true, record: Some(&record) }), &probes);
+        let m = migrate_legacy_settings(&json!({ "installDir": "D:\\G" }), LIVE, Some(LegacyFolder { holds_game: true, record: Some(&record) }), &probes, "");
         let q = m.question.unwrap();
         assert_eq!(q.suggested, Channel::Rc);
         assert!(q.message.starts_with("This folder looks like an RC install"));
@@ -292,7 +376,7 @@ mod tests {
 
     #[test]
     fn a_custom_server_stays_the_live_feed_override() {
-        let m = migrate_legacy_settings(&json!({ "feedUrl": "https://other.example/manifest.json" }), LIVE, None, &Probes::new());
+        let m = migrate_legacy_settings(&json!({ "feedUrl": "https://other.example/manifest.json" }), LIVE, None, &Probes::new(), "");
         assert_eq!((m.settings.feed_url.as_str(), m.settings.channel), ("https://other.example/manifest.json", Channel::Live));
     }
 

@@ -3,6 +3,7 @@
 
 mod launcher;
 mod platform;
+mod single_instance;
 
 use launcher::{Args, Launcher};
 use std::sync::Arc;
@@ -41,15 +42,9 @@ fn main() {
         return;
     }
     let mut builder = tauri::Builder::default();
-    // A self-test or a freshly swapped-in build may run beside the old process for a moment.
+    // Updated children register after reporting healthy and waiting for the old owner.
     if args.self_updated.is_none() && args.self_test.is_none() {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        }));
+        builder = builder.plugin(single_instance::plugin());
     }
     let setup_args = args.clone();
     let result = builder

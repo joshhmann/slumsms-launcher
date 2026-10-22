@@ -116,7 +116,7 @@ pub fn start_and_confirm(rollback: &Rollback, version: &str, args: &[String], ti
     let marker = healthy_marker(&rollback.exe, version);
     let _ = std::fs::remove_file(&marker);
     let mut command = Command::new(&rollback.exe);
-    command.args(args).arg(format!("--self-updated={version}"));
+    command.args(args).arg(format!("--self-updated={version}")).arg(format!("--update-parent={}", std::process::id()));
     // On Linux a freshly written exe can briefly be "text file busy" while another thread forks.
     let mut spawned = command.spawn();
     for _ in 0..20 {

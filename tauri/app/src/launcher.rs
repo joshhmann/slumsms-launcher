@@ -5,7 +5,7 @@
 use crate::platform;
 use crate::VERSION;
 use serde_json::{json, Map, Value};
-use slums_core::channels::{accessible_channels, channel_feed, channel_install_dir, effective_channel, folder_owner, probe_channels, show_channel_picker, update_manifest_url, Channel, Probes, CHANNELS};
+use slums_core::channels::{accessible_channels, change_folder, channel_feed, channel_install_dir, effective_channel, folder_owner, probe_channels, show_channel_picker, update_manifest_url, Channel, Probes, CHANNELS};
 use slums_core::config::{detect_bundled_client, effective_access_key, read_launcher_config, standalone_install_dir, valid_access_key, validate_feed_url, LauncherConfig};
 use slums_core::error::{ACCESS_KEY_REQUIRED, CONFIG_MISSING, GAME_RUNNING};
 use slums_core::game_config::{game_running, read_game_config, write_game_config};
@@ -15,7 +15,7 @@ use slums_core::install::{inspect_release, install_release, InspectResult, Insta
 use slums_core::play::{play_plan, reuse_verified, PlayPlan, RecentVerify, VERIFIED_REUSE_MS};
 use slums_core::release::{check_available_release, load_release, read_installed_record, Available, Release, AVAILABLE_TIMEOUT};
 use slums_core::selfupdate;
-use slums_core::settings::{apply_migration_answer, migrate_legacy_settings, read_asar_file, read_settings, write_settings, LegacyFolder, PendingGameOptions, Settings};
+use slums_core::settings::{apply_migration_answer, migrate_legacy_install, read_asar_file, read_settings, write_settings, PendingGameOptions, Settings};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -37,6 +37,7 @@ pub struct Args {
     /// Steps a self-test runs after the page's first check: install, repair, play, options, channel:ID.
     pub self_test_steps: Vec<String>,
     pub self_updated: Option<String>,
+    pub update_parent: Option<u32>,
     pub self_update_failed: Option<String>,
     pub handover_from: Option<String>,
     pub no_self_update: bool,
@@ -60,6 +61,7 @@ impl Args {
                 steps
             },
             self_updated: value("--self-updated="),
+            update_parent: value("--update-parent=").and_then(|p| p.parse().ok()),
             self_update_failed: value("--self-update-failed="),
             handover_from: value("--handover-from="),
             no_self_update: list.iter().any(|a| a == "--no-self-update") || std::env::var("SLUMSMS_NO_SELF_UPDATE").as_deref() == Ok("1"),
@@ -120,7 +122,7 @@ pub struct Launcher {
     inner: Mutex<Inner>,
     busy: AtomicBool,
     quitting: AtomicBool,
-    install_cancel: Mutex<Option<CancellationToken>>,
+    operation_cancel_token: Mutex<Option<CancellationToken>>,
     available_request: AtomicU64,
     options_lock: tokio::sync::Mutex<()>,
     last_progress: Mutex<Instant>,
@@ -213,7 +215,7 @@ impl Launcher {
             inner: Mutex::new(Inner { settings, probes: Probes::new(), state, last_verified: None, self_update_checked: false, skip_version: None, page_ready_ms: None, first_check_ms: None, self_test_started: false }),
             busy: AtomicBool::new(false),
             quitting: AtomicBool::new(false),
-            install_cancel: Mutex::new(None),
+            operation_cancel_token: Mutex::new(None),
             available_request: AtomicU64::new(0),
             options_lock: tokio::sync::Mutex::new(()),
             last_progress: Mutex::new(Instant::now() - Duration::from_secs(1)),
@@ -413,11 +415,7 @@ impl Launcher {
         let live_feed = self.args.feed_url.clone().unwrap_or_else(|| self.config.feed_url.clone());
         let key = legacy.get("accessKey").and_then(Value::as_str).unwrap_or("").to_string();
         let (probes, user) = probe_channels(&live_feed, &key, ACCESS_KEY_USER).await;
-        let dir = legacy.get("installDir").and_then(Value::as_str).unwrap_or("").to_string();
-        let record = if dir.is_empty() { None } else { read_installed_record(&dir) };
-        let holds_game = !dir.is_empty() && (record.is_some() || exists(&Path::new(&dir).join(&self.config.client_executable)));
-        let folder = (!dir.is_empty()).then(|| LegacyFolder { holds_game, record: record.as_ref() });
-        let migration = migrate_legacy_settings(&legacy, &live_feed, folder, &probes);
+        let migration = migrate_legacy_install(&legacy, &live_feed, &self.bundled_dir, &self.standalone_dir, &self.config.client_executable, &probes);
         let mut settings = migration.settings;
         settings.access_user = user;
         settings.migration_question = migration.question.clone();
@@ -516,11 +514,13 @@ impl Launcher {
         if self.busy.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
             return Err("A launcher operation is already running.".into());
         }
+        *self.operation_cancel_token.lock().unwrap() = Some(CancellationToken::new());
         self.send(json!({ "phase": phase, "canPlay": false, "accessKeyNeeded": false, "offlinePlay": false, "filesDone": 0, "filesTotal": 0, "bytesDone": 0, "bytesTotal": 0, "bytesPerSecond": null, "etaSeconds": null }));
         Ok(())
     }
 
     fn end<T>(&self, result: slums_core::Result<T>) -> Cmd<T> {
+        *self.operation_cancel_token.lock().unwrap() = None;
         self.busy.store(false, Ordering::SeqCst);
         result.map_err(|error| {
             let denied = error.is(ACCESS_KEY_REQUIRED);
@@ -551,6 +551,16 @@ impl Launcher {
             "bytesPerSecond": p.bytes_per_second, "etaSeconds": p.eta_seconds, "resumed": p.resumed }));
     }
 
+    fn save_folder(&self, channel: Channel, dir: String) -> Cmd<()> {
+        let settings = {
+            let mut inner = self.inner.lock().unwrap();
+            change_folder(&mut inner.settings.folders, channel, dir, &self.bundled_dir, &self.standalone_dir, cfg!(windows))?;
+            inner.settings.clone()
+        };
+        self.persist(&settings);
+        Ok(())
+    }
+
     fn require_settings(&self) -> slums_core::Result<Effective> {
         let e = self.effective();
         if e.feed_url.is_empty() || e.install_dir.is_empty() {
@@ -564,14 +574,19 @@ impl Launcher {
         self.inner.lock().unwrap().last_verified = Some((recent, release.clone()));
     }
 
+    fn operation_cancel(&self) -> CancellationToken {
+        self.operation_cancel_token.lock().unwrap().clone().unwrap_or_default()
+    }
+
     /// mode Fast trusts files whose size and mtime match the install state; Full (Repair) hashes everything.
     async fn check_release(self: &Arc<Self>, mode: Mode) -> slums_core::Result<(Arc<Release>, InspectResult)> {
         let e = self.require_settings()?;
         let access = Self::access(&e)?;
-        let release = Arc::new(load_release(&e.feed_url, Some(&e.install_dir), &access, &CancellationToken::new()).await?);
+        let cancel = self.operation_cancel();
+        let release = Arc::new(load_release(&e.feed_url, Some(&e.install_dir), &access, &cancel).await?);
         self.send(json!({ "version": release.version, "news": release.news.clone().unwrap_or_default(), "available": available_from(&release), "message": "Checking installed game files." }));
         let fresh = !exists(&executable_path(&e.install_dir, &release.launch.executable));
-        let pending = inspect_release(&e.install_dir, release.clone(), self.progress_fn(None), mode, CancellationToken::new()).await?;
+        let pending = inspect_release(&e.install_dir, release.clone(), self.progress_fn(None), mode, cancel).await?;
         self.refresh_installed().await;
         if pending.pending_files == 0 {
             self.mark_verified(&release, &e);
@@ -587,15 +602,13 @@ impl Launcher {
     async fn install_files(self: &Arc<Self>, mode: Mode, message: Option<String>) -> slums_core::Result<Arc<Release>> {
         let e = self.require_settings()?;
         let access = Self::access(&e)?;
-        let release = Arc::new(load_release(&e.feed_url, Some(&e.install_dir), &access, &CancellationToken::new()).await?);
+        let cancel = self.operation_cancel();
+        let release = Arc::new(load_release(&e.feed_url, Some(&e.install_dir), &access, &cancel).await?);
         let default_message = if mode == Mode::Full { "Verifying every file and repairing damage." } else { "Checking what is already installed." };
         self.send(json!({ "phase": "updating", "version": release.version, "news": release.news.clone().unwrap_or_default(), "available": available_from(&release),
             "message": message.clone().unwrap_or_else(|| default_message.into()) }));
-        let cancel = CancellationToken::new();
-        *self.install_cancel.lock().unwrap() = Some(cancel.clone());
         let options = InstallOptions { mode, concurrency: self.config.download_concurrency, cancel, ..Default::default() };
         let result = install_release(&e.install_dir, release.clone(), self.progress_fn(None), options).await;
-        *self.install_cancel.lock().unwrap() = None;
         result.map_err(|mut error| {
             if error.is(slums_core::error::ABORTED) {
                 error.message = "The download was stopped. Everything finished so far is kept; the next install continues from there.".into();
@@ -895,7 +908,7 @@ impl Launcher {
                 }
                 // Stop the install cleanly so it records what it finished, then quit (at most a few seconds).
                 me.quitting.store(true, Ordering::SeqCst);
-                if let Some(cancel) = me.install_cancel.lock().unwrap().as_ref() {
+                if let Some(cancel) = me.operation_cancel_token.lock().unwrap().as_ref() {
                     cancel.cancel();
                 }
                 let me = me.clone();
@@ -1067,6 +1080,9 @@ pub async fn settings(launcher: L<'_>) -> Cmd<Value> {
                 _ => l.log("Self-update: could not confirm start."),
             }
         }
+        if l.args.self_updated.is_some() && l.args.self_test.is_none() {
+            crate::single_instance::after_update(l.app.clone(), l.args.update_parent);
+        }
     }
     l.send(json!({}));
     Ok(l.settings_json())
@@ -1160,7 +1176,7 @@ pub async fn choose_folder(launcher: L<'_>) -> Cmd<Value> {
             return Err(format!("That folder is the {} game folder. Each channel needs its own folder.", label(owner)));
         }
         let channel = e.channel;
-        l.update_settings(|s| s.folders.set(channel, dir));
+        l.save_folder(channel, dir)?;
         l.send(json!({ "phase": "idle", "message": "Game folder saved.", "canPlay": false }));
         l.refresh_installed().await;
     }
@@ -1172,7 +1188,7 @@ pub async fn reset_folder(launcher: L<'_>) -> Cmd<Value> {
     let l = launcher.inner().clone();
     l.require_idle()?;
     let channel = l.effective().channel;
-    l.update_settings(|s| s.folders.set(channel, String::new()));
+    l.save_folder(channel, String::new())?;
     l.send(json!({ "phase": "idle", "message": "Game folder reset to the default.", "canPlay": false }));
     l.refresh_installed().await;
     Ok(l.settings_json())
