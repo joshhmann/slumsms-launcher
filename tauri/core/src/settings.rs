@@ -3,7 +3,7 @@
 //! read; game folders are never moved, copied or downloaded again.
 
 use crate::channels::{channel_of_feed, folder_channel, Channel, Folders, Probes};
-use crate::config::valid_access_key;
+use crate::config::clean_access_key;
 use crate::error::{Error, Result};
 use crate::release::InstalledRecord;
 use serde::{Deserialize, Serialize};
@@ -95,9 +95,7 @@ pub fn read_settings(text: &str) -> Settings {
         s.migrated_from = value.get("migratedFrom").and_then(Value::as_str).unwrap_or("").into();
         s
     });
-    if !valid_access_key(&settings.access_key) {
-        settings.access_key.clear();
-    }
+    settings.access_key = clean_access_key(&settings.access_key).unwrap_or_default();
     settings.settings_version = 2;
     settings
 }
@@ -160,7 +158,7 @@ pub fn migrate_legacy_settings(legacy: &Value, live_feed_url: &str, folder: Opti
     let feed_channel = if feed.is_empty() { Some(Channel::Live) } else { channel_of_feed(feed, live_feed_url) };
     let mut settings = Settings {
         feed_url: if !feed.is_empty() && feed_channel.is_none() { feed.to_string() } else { String::new() },
-        access_key: legacy.get("accessKey").and_then(Value::as_str).filter(|k| valid_access_key(k)).unwrap_or("").to_string(),
+        access_key: legacy.get("accessKey").and_then(Value::as_str).and_then(clean_access_key).unwrap_or_default(),
         channel: feed_channel.unwrap_or(Channel::Live),
         migrated_from: "electron".into(),
         ..Default::default()
@@ -390,6 +388,9 @@ mod tests {
         let odd = read_settings(r#"{ "channel": "staging", "accessKey": "bad\u0001", "folders": { "live": "C:\\L" }, "feedUrl": 3 }"#);
         assert_eq!((odd.channel, odd.access_key.as_str(), odd.folders.live.as_str()), (Channel::Live, "", "C:\\L"));
         assert_eq!(read_settings("garbage"), Settings::default());
+        assert_eq!(read_settings(r#"{ "accessKey": " pasted\r\n" }"#).access_key, "pasted", "a key saved with a line break still works");
+        let m = migrate_legacy_settings(&json!({ "accessKey": "electron-key\n" }), LIVE, None, &Probes::new(), "");
+        assert_eq!(m.settings.access_key, "electron-key");
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 

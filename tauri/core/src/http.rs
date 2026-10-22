@@ -65,6 +65,7 @@ pub struct FeedAccess {
 
 impl FeedAccess {
     pub fn new(feed_url: &str, access_key: &str, user: &str) -> Result<Self> {
+        let access_key = access_key.trim();
         let origin = network_url(feed_url)?.origin();
         let authorization = if access_key.is_empty() {
             String::new()

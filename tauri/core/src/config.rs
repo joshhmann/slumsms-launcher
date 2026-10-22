@@ -39,9 +39,17 @@ pub fn valid_access_key(value: &str) -> bool {
     crate::manifest::js_len(value) <= 256 && !value.chars().any(|c| (c as u32) < 0x20 || c as u32 == 0x7f)
 }
 
+/// A key as typed or pasted, without the surrounding spaces or line break a copy often brings
+/// along; `None` when what is left is still not a valid key.
+pub fn clean_access_key(value: &str) -> Option<String> {
+    let key = value.trim();
+    valid_access_key(key).then(|| key.to_string())
+}
+
 /// The player's saved key wins; otherwise the built-in key, but only while the feed is on the
 /// built-in feed's origin, so a custom server never receives the shipped key.
 pub fn effective_access_key(saved: &str, default_key: &str, feed_url: &str, default_feed_url: &str) -> String {
+    let (saved, default_key) = (saved.trim(), default_key.trim());
     if !saved.is_empty() {
         return saved.to_string();
     }
@@ -73,9 +81,9 @@ pub fn read_launcher_config(files: &[(String, Option<String>)]) -> Result<Launch
             config.client_executable = name.to_string();
         }
         if let Some(key) = value.get("accessKey") {
-            match key.as_str() {
-                Some(k) if valid_access_key(k) => config.access_key = k.to_string(),
-                _ => return Err(Error::permanent(format!("Launcher config accessKey must be a string without control characters in {label}."))),
+            match key.as_str().and_then(clean_access_key) {
+                Some(k) => config.access_key = k,
+                None => return Err(Error::permanent(format!("Launcher config accessKey must be a string without control characters in {label}."))),
             }
         }
         if let Some(count) = value.get("downloadConcurrency") {
@@ -131,6 +139,20 @@ mod tests {
         assert!(validate_feed_url("http://example.com/m.json").is_err());
         assert!(validate_feed_url("https://slums:key@example.com/m.json").is_err());
         assert!(validate_feed_url("not a url").is_err());
+    }
+
+    #[test]
+    fn a_pasted_key_loses_its_surrounding_spaces_and_line_break() {
+        assert_eq!(clean_access_key("  dev-key \r\n").as_deref(), Some("dev-key"));
+        assert_eq!(clean_access_key("dev key").as_deref(), Some("dev key"), "inner spaces are part of the key");
+        assert_eq!(clean_access_key(" \n").as_deref(), Some(""));
+        assert_eq!(clean_access_key("a\u{1}b"), None);
+        assert_eq!(clean_access_key(&"k".repeat(257)), None);
+        let live = "https://slumspatch.asslorde.com/manifest.json";
+        assert_eq!(effective_access_key("mine\n", "built", live, live), "mine");
+        assert_eq!(effective_access_key(" ", " built ", live, live), "built");
+        let config = read_launcher_config(&[(String::from("x"), Some(r#"{ "accessKey": " k\n" }"#.into()))]).unwrap();
+        assert_eq!(config.access_key, "k");
     }
 
     #[test]

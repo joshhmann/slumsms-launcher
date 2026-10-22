@@ -6,7 +6,7 @@ use crate::platform;
 use crate::VERSION;
 use serde_json::{json, Map, Value};
 use slums_core::channels::{accessible_channels, change_folder, channel_feed, channel_install_dir, effective_channel, folder_owner, probe_channels, show_channel_picker, update_manifest_url, Channel, Probes, CHANNELS};
-use slums_core::config::{detect_bundled_client, effective_access_key, read_launcher_config, standalone_install_dir, valid_access_key, validate_feed_url, LauncherConfig};
+use slums_core::config::{detect_bundled_client, clean_access_key, effective_access_key, read_launcher_config, standalone_install_dir, valid_access_key, validate_feed_url, LauncherConfig};
 use slums_core::error::{ACCESS_KEY_REQUIRED, CONFIG_MISSING, GAME_RUNNING};
 use slums_core::game_config::{game_running, read_game_config, write_game_config};
 use slums_core::game_options::{default_values, validate_changes};
@@ -1120,9 +1120,9 @@ pub async fn reset_feed(launcher: L<'_>) -> Cmd<Value> {
 
 async fn save_key(l: Arc<Launcher>, key: String, message: &str) -> Cmd<Value> {
     l.require_idle()?;
-    if !valid_access_key(&key) {
+    let Some(key) = clean_access_key(&key) else {
         return Err("The access key cannot contain control characters or exceed 256 characters.".into());
-    }
+    };
     l.update_settings(|s| {
         s.access_key = key;
         s.access_user.clear(); // the server says again which user this key belongs to
