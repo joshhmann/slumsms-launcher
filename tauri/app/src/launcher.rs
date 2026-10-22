@@ -450,7 +450,7 @@ impl Launcher {
         let changed_user = {
             let mut inner = self.inner.lock().unwrap();
             inner.probes = probes;
-            if !key.is_empty() && inner.settings.access_user != user && inner.probes.get(&Channel::Live).is_some_and(Available::is_ok) {
+            if !key.is_empty() && inner.settings.access_user != user && inner.probes.values().any(Available::is_ok) {
                 inner.settings.access_user = user.clone();
                 Some(inner.settings.clone())
             } else {

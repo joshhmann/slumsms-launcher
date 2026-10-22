@@ -564,3 +564,32 @@ async fn normal_release_checks_can_be_cancelled_during_metadata_reads() {
     let error = tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap().unwrap_err();
     assert!(error.is(slums_core::error::ABORTED));
 }
+
+#[tokio::test]
+async fn a_dev_only_key_still_opens_test_and_rc_when_live_refuses_it() {
+    use slums_core::channels::{probe_channels, Channel};
+    let server = Server::start().await;
+    for prefix in ["", "launcher-test/", "launcher-rc/"] {
+        server.put_all(publish(prefix, "1.0", "SlumsMS.exe", &[client_layer("1.0", b"exe")], &["config.ini"], None).files);
+    }
+    // The nginx dev tier: Live takes only the player key as "slums"; Test/RC take only "slumsdev".
+    server.require(&[basic("slums", "player"), basic("slumsdev", "dev")]);
+    let dev = basic("slumsdev", "dev");
+    server.hook(move |l, _| {
+        let is_dev = l.authorization.as_deref() == Some(dev.as_str());
+        if (l.path == "/manifest.json" && is_dev) || (l.path.starts_with("/launcher-") && !is_dev) { Action::Status(401) } else { Action::Serve }
+    });
+    let live = server.url("manifest.json");
+
+    let (probes, user) = probe_channels(&live, "dev", ACCESS_KEY_USER).await;
+    let status = |c: Channel| probes[&c].status();
+    assert_eq!((status(Channel::Live), status(Channel::Test), status(Channel::Rc)), ("access-key", "ok", "ok"));
+    assert_eq!(user, DEV_ACCESS_USER, "the user that opened Test/RC is remembered");
+    let (probes, user) = probe_channels(&live, "dev", DEV_ACCESS_USER).await;
+    assert_eq!((probes[&Channel::Test].status(), user.as_str()), ("ok", DEV_ACCESS_USER), "next start asks as slumsdev first");
+
+    let (probes, user) = probe_channels(&live, "player", ACCESS_KEY_USER).await;
+    assert_eq!((probes[&Channel::Live].status(), probes[&Channel::Test].status(), user.as_str()), ("ok", "access-key", ACCESS_KEY_USER));
+    let (probes, user) = probe_channels(&live, "wrong", ACCESS_KEY_USER).await;
+    assert_eq!((probes[&Channel::Live].status(), probes[&Channel::Rc].status(), user.as_str()), ("access-key", "access-key", ACCESS_KEY_USER), "a wrong key keeps the player user");
+}

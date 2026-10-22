@@ -91,7 +91,8 @@ pub fn effective_channel(selected: Channel, probes: &Probes) -> Channel {
 
 /// Probe every channel's top-level manifest. The server decides which Basic-auth user a key belongs
 /// to: Live is asked with `preferred` ("slums" unless a dev key was seen before), then with the other
-/// user if that is refused. Returns the probes and the user that opened Live (or `preferred`).
+/// user if that is refused. If Live refuses both, Test and RC are also asked as "slumsdev", so a
+/// dev-only key still opens them. Returns the probes and the user that opened a channel (or `preferred`).
 pub async fn probe_channels(live_feed_url: &str, key: &str, preferred: &str) -> (Probes, String) {
     use crate::http::{FeedAccess, ACCESS_KEY_USER, DEV_ACCESS_USER};
     use crate::release::{check_available_release, AVAILABLE_TIMEOUT};
@@ -112,7 +113,16 @@ pub async fn probe_channels(live_feed_url: &str, key: &str, preferred: &str) -> 
             user = other.to_string();
         }
     }
-    let (test, rc) = futures_util::join!(check(channel_feed(live_feed_url, Channel::Test), user.clone()), check(channel_feed(live_feed_url, Channel::Rc), user.clone()));
+    let (mut test, mut rc) = futures_util::join!(check(channel_feed(live_feed_url, Channel::Test), user.clone()), check(channel_feed(live_feed_url, Channel::Rc), user.clone()));
+    // A dev-only key: Live refused it under both users, so Test/RC were just asked as "slums".
+    // Ask them as "slumsdev" too, and keep that user if either of them opens.
+    if !key.is_empty() && matches!(live, Available::AccessKey { .. }) && user != DEV_ACCESS_USER {
+        let (dev_test, dev_rc) = futures_util::join!(check(channel_feed(live_feed_url, Channel::Test), DEV_ACCESS_USER.to_string()), check(channel_feed(live_feed_url, Channel::Rc), DEV_ACCESS_USER.to_string()));
+        if dev_test.is_ok() || dev_rc.is_ok() {
+            (test, rc) = (dev_test, dev_rc);
+            user = DEV_ACCESS_USER.to_string();
+        }
+    }
     ([(Channel::Live, live), (Channel::Test, test), (Channel::Rc, rc)].into_iter().collect(), user)
 }
 
