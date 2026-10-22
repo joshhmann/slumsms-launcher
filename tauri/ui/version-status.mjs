@@ -86,3 +86,25 @@ export function playPlan({ offered, record }) {
   return 'verify';
 }
 
+
+/**
+ * The small help line under the status message. Empty when the status message already says it:
+ * a ready, verified client ("All release files verified. Ready to play.") needs no second
+ * "All game files verified." line, so the renderer hides the line instead.
+ */
+export function actionHelp({ bridgeAvailable, initialized, phase, busy, feedUrl, actionKind, canPlay, offlinePlay, resuming, fresh, accessKeyNeeded }) {
+  if (!bridgeAvailable) return 'Open SlumsMS in the desktop launcher to manage your client.';
+  if (!initialized) return 'Starting…';
+  if (phase === 'self-updating') return 'The launcher restarts by itself when the update is ready.';
+  if (busy) return 'Keep the launcher open while this finishes.';
+  if (!feedUrl) return 'Set the update server in Settings to get started.';
+  if (phase === 'ready' && canPlay && actionKind === 'update') return 'A new release is out. Update downloads only the files that changed, then starts the game.';
+  if (phase === 'ready' && offlinePlay) return 'Couldn’t check for updates. If the game says it is out of date, try again once you are online.';
+  if (phase === 'ready' && canPlay) return '';
+  if (resuming) return 'Continue install picks up where the last download stopped.';
+  if (fresh) return 'Install downloads the game, then checks every file.';
+  if (phase === 'needs-update') return 'Update downloads only the files that changed.';
+  if (phase === 'error' && accessKeyNeeded) return 'Open Settings and enter the access key your server staff gave you.';
+  if (phase === 'error') return 'Try again, or open Settings to repair files or change the game folder.';
+  return 'Check for updates to verify your game files.';
+}

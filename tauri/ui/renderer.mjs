@@ -1,4 +1,4 @@
-import { versionStatus, versionFooter, formatTimeLeft } from './version-status.mjs';
+import { versionStatus, versionFooter, formatTimeLeft, actionHelp } from './version-status.mjs';
 import { GAME_OPTIONS } from './game-options.mjs';
 
 const elements = Object.fromEntries([
@@ -88,7 +88,7 @@ function isCount(value) {
 function renderProgress() {
   const visible = state.phase === 'checking' || state.phase === 'updating' || state.phase === 'self-updating';
   elements['progress-area'].hidden = !visible;
-  elements['action-help'].hidden = visible;
+  elements['action-help'].hidden = visible || !elements['action-help'].textContent;
   if (!visible) {
     elements['operation-progress'].removeAttribute('value');
     elements['progress-detail'].textContent = '';
@@ -428,22 +428,10 @@ function render() {
   }[configuration.accessKeySource] ?? 'Only needed if the update server asks for one.';
   elements['version-info'].textContent = versionFooter(configuration.appVersion, state.installed, state.available);
 
-  let help;
-  if (!bridgeAvailable) help = 'Open SlumsMS in the desktop launcher to manage your client.';
-  else if (!initialized) help = 'Starting…';
-  else if (phase === 'self-updating') help = 'The launcher restarts by itself when the update is ready.';
-  else if (busy) help = 'Keep the launcher open while this finishes.';
-  else if (!configuration.feedUrl) help = 'Set the update server in Settings to get started.';
-  else if (phase === 'ready' && state.canPlay && action.kind === 'update') help = 'A new release is out. Update downloads only the files that changed, then starts the game.';
-  else if (phase === 'ready' && state.offlinePlay) help = 'Couldn’t check for updates. If the game says it is out of date, try again once you are online.';
-  else if (phase === 'ready' && state.canPlay) help = 'All game files verified.';
-  else if (resuming()) help = 'Continue install picks up where the last download stopped.';
-  else if (fresh) help = 'Install downloads the game, then checks every file.';
-  else if (phase === 'needs-update') help = 'Update downloads only the files that changed.';
-  else if (phase === 'error' && state.accessKeyNeeded) help = 'Open Settings and enter the access key your server staff gave you.';
-  else if (phase === 'error') help = 'Try again, or open Settings to repair files or change the game folder.';
-  else help = 'Check for updates to verify your game files.';
-  elements['action-help'].textContent = help;
+  elements['action-help'].textContent = actionHelp({
+    bridgeAvailable, initialized, phase, busy, feedUrl: configuration.feedUrl, actionKind: action.kind,
+    canPlay: state.canPlay, offlinePlay: state.offlinePlay, resuming: resuming(), fresh, accessKeyNeeded: state.accessKeyNeeded,
+  });
   renderProgress();
 }
 
