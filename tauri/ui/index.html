@@ -43,16 +43,7 @@
             <p class="status-message" id="status-message" role="status" aria-live="polite" aria-atomic="true">Loading launcher settings…</p>
             <p class="install-target" id="install-target" hidden>Installing to <span class="install-target-path" id="install-target-path"></span> <button class="link-button" id="change-folder-inline" type="button">Change</button></p>
           </div>
-          <div class="release-detail" id="release-detail" data-kind="checking">
-            <div class="release-row"><span class="detail-label">INSTALLED</span><span class="release-value" id="installed-version">Unknown</span></div>
-            <div class="release-row"><span class="detail-label">AVAILABLE</span><span class="release-value" id="available-version">Checking…</span></div>
-            <div class="release-row"><span class="detail-label">CHANNEL</span><span class="release-value channel-value"><span id="channel-name">Live</span><select class="channel-select" id="channel-select" aria-label="Channel" hidden></select></span></div>
-            <span class="release-note" id="release-note" hidden></span>
-          </div>
-        </section>
-
-        <section class="action-bar" aria-label="Client actions">
-          <div class="action-status">
+          <div class="action-status" role="group" aria-label="Client actions">
             <div class="progress-area" id="progress-area" hidden>
               <div class="progress-caption"><span id="progress-label">Working…</span><span id="progress-detail"></span></div>
               <progress id="operation-progress" max="1" aria-labelledby="progress-label"></progress>
@@ -60,6 +51,12 @@
             <p class="action-help" id="action-help">Starting…</p>
           </div>
           <button class="button button-play" id="play" type="button" disabled><span id="play-label">Play</span><span class="play-arrow" aria-hidden="true">▶</span></button>
+          <div class="release-detail" id="release-detail" data-kind="checking">
+            <div class="release-row"><span class="detail-label">INSTALLED</span><span class="release-value" id="installed-version">Unknown</span></div>
+            <div class="release-row"><span class="detail-label">AVAILABLE</span><span class="release-value" id="available-version">Checking…</span></div>
+            <div class="release-row"><span class="detail-label">CHANNEL</span><span class="release-value channel-value"><span id="channel-name">Live</span><select class="channel-select" id="channel-select" aria-label="Channel" hidden></select></span></div>
+            <span class="release-note" id="release-note" hidden></span>
+          </div>
         </section>
         <p class="error-message" id="error-message" role="alert" hidden></p>
       </main>
