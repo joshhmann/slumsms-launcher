@@ -3,7 +3,7 @@ import { readFile, writeFile, appendFile, mkdir, rename, stat } from 'node:fs/pr
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
-import { loadRelease, inspectRelease, installRelease, loadLauncherChannel, readInstalledRecord, checkAvailableRelease } from './updater.mjs';
+import { loadRelease, inspectRelease, installRelease, loadLauncherChannel, readInstalledRecord, checkAvailableRelease, rememberAccessUser, onAccessUserChange } from './updater.mjs';
 import { launcherUpdateDecision, prepareLauncherUpdate, startLauncherSwap, cleanupLauncherUpdates, healthyMarker } from './self-update.mjs';
 import { reuseVerified, playPlan } from './version-status.mjs';
 import { loadTauriChannel, downloadTauriBuild, verifyTauriSignature, handoverToTauri, TAURI_PUBLIC_KEY } from './handover.mjs';
@@ -16,7 +16,8 @@ const page = pathToFileURL(path.join(here, 'index.html')).href;
 let window;
 // settings.json (per-user app data, never the game folder) holds only the player's overrides;
 // launcher.config.json supplies the defaults. The access key never leaves the main process.
-let settings = { feedUrl: '', installDir: '', accessKey: '', pendingGameOptions: null };
+// accessUser: the Basic-auth user the feed accepted for the key ("slums" or the dev key's "slumsdev").
+let settings = { feedUrl: '', installDir: '', accessKey: '', accessUser: '', pendingGameOptions: null };
 let config = { feedUrl: '', clientExecutable: '', downloadConcurrency: 12, accessKey: '' };
 let bundledDir = '';
 let busy = false;
@@ -327,7 +328,8 @@ else {
     try {
       const saved = JSON.parse(await readFile(settingsFile(), 'utf8'));
       settings = { feedUrl: typeof saved.feedUrl === 'string' ? saved.feedUrl : '', installDir: typeof saved.installDir === 'string' ? saved.installDir : '',
-        accessKey: validAccessKey(saved.accessKey) ? saved.accessKey : '', pendingGameOptions: readPending(saved.pendingGameOptions) };
+        accessKey: validAccessKey(saved.accessKey) ? saved.accessKey : '', accessUser: typeof saved.accessUser === 'string' ? saved.accessUser : '',
+        pendingGameOptions: readPending(saved.pendingGameOptions) };
     } catch (error) { if (error.code !== 'ENOENT') state.message = `Could not read saved settings: ${error.message}`; }
     for (const [flag, key] of [['--feed-url=', 'feedUrl'], ['--install-dir=', 'installDir']]) {
       const value = process.argv.find(argument => argument.startsWith(flag));
@@ -339,6 +341,13 @@ else {
       config = await readLauncherConfig([path.join(here, 'launcher.config.json'), ...(app.isPackaged ? [path.join(launcherDir, 'launcher.config.json')] : [])]);
     } catch (error) { state = { ...state, phase: 'error', message: error.message }; }
     if (app.isPackaged) bundledDir = await detectBundledClient(launcherDir, config.clientExecutable);
+    // Start with the user the feed accepted last time; remember it when the feed accepts the other one.
+    rememberAccessUser(settings.feedUrl || config.feedUrl, accessKey(), settings.accessUser);
+    onAccessUserChange((user) => {
+      settings.accessUser = user;
+      void persist().catch(() => {});
+      void log(`Access key: the update server accepts it as user "${user}".`);
+    });
     window = new BrowserWindow({ width: 1060, height: 860, minWidth: 860, minHeight: 700, backgroundColor: '#16203a',
       webPreferences: { preload: path.join(here, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } });
     let quitting = false;
@@ -375,7 +384,7 @@ else {
     const saveKey = async (value, message) => {
       if (busy) throw new Error('Wait for the current operation to finish.');
       if (!validAccessKey(value)) throw new Error('The access key cannot contain control characters or exceed 256 characters.');
-      settings.accessKey = value; await persist();
+      settings.accessKey = value; settings.accessUser = ''; await persist();
       send({ phase: 'idle', message, canPlay: false, version: undefined, news: [] });
       void refreshVersions({ reset: true });
       return effective();

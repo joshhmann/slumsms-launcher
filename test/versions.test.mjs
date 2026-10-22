@@ -132,7 +132,8 @@ test('availability check sends the access key and reports 401 as access-key, wit
   f.requests.length = 0;
   const denied = await checkAvailableRelease(f.url, { accessKey: 'wrong' });
   assert.equal(denied.status, 'access-key');
-  assert.deepEqual(f.requests, ['manifest.json']);
+  // Tried once as "slums" and once as "slumsdev"; never retried beyond that.
+  assert.deepEqual(f.requests, ['manifest.json', 'manifest.json']);
   assert.equal((await checkAvailableRelease(f.url)).status, 'access-key');
 });
 

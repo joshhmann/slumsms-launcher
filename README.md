@@ -180,6 +180,8 @@ The publisher reads the version from the build's own `resources/app.asar` (`--ve
 3. Stage it in `.slumsms-launcher-update/handover-VERSION/`, rename the running `SlumsMS Launcher.exe` to `.slumsms-launcher-update/electron-rollback/SlumsMS Launcher.exe`, move the Tauri exe in under the same name (shortcuts keep working) and start it with `--handover-from=electron-1.5.0` (plus `--feed-url=`/`--install-dir=` if given).
 4. The Tauri launcher writes `.slumsms-launcher-update/healthy-VERSION` once its window has loaded; then Electron exits. If it exits early or stays silent for 90 s, Electron kills it, keeps it as `failed-handover-VERSION-SlumsMS Launcher.exe`, renames its own exe back and carries on (no new attempt that session).
 
+**Dev key (1.5.0).** The key is sent as user `slums`. If the feed's own origin answers 401/403, the same request is repeated once as `slumsdev`, the dev key's user, which after the nginx dev tier is the only user that opens `/launcher-test/` and `/launcher-rc/`. The user that worked is remembered (`accessUser` in settings.json) and tried first next time. Neither user name is ever sent to another origin. A wrong key therefore costs two requests, never more.
+
 Only the exe is replaced. `resources/` (the Tauri launcher reads `resources/app.asar` once to carry over a friends build's built-in access key), the Electron DLLs and `locales/` stay until a later cleanup. Settings migrate on the Tauri side (it reads `%APPDATA%\mapleroot-launcher\settings.json` without changing it). `--no-handover` or `SLUMSMS_NO_HANDOVER=1` turns the hand-over off.
 
 ## Fast verify vs Repair

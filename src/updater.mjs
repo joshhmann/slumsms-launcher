@@ -256,17 +256,48 @@ function permanent(error) {
 }
 
 export const ACCESS_KEY_USER = 'slums';
+/** The dev key's Basic-auth user (opens the Test and RC channels too); the server decides which works. */
+export const DEV_ACCESS_USER = 'slumsdev';
 export const ACCESS_KEY_MESSAGE = 'This server needs an access key - enter it in Settings';
+
+// Which user the feed accepted for a key, per origin (keyed by a hash, never the key itself).
+const acceptedUsers = new Map();
+let acceptedUserListener = () => {};
+const userSlot = (origin, key) => `${origin}\n${createHash('sha256').update(key).digest('hex')}`;
+const basicHeader = (user, key) => `Basic ${Buffer.from(`${user}:${key}`, 'utf8').toString('base64')}`;
+
+/** Start from a user remembered earlier (e.g. settings.accessUser); only "slums" or "slumsdev". */
+export function rememberAccessUser(feedUrl, accessKey, user) {
+  if (!accessKey || ![ACCESS_KEY_USER, DEV_ACCESS_USER].includes(user)) return;
+  try { acceptedUsers.set(userSlot(networkURL(feedUrl).origin, accessKey), user); } catch { /* invalid feed: nothing to remember */ }
+}
+
+/** Called with (user) whenever the feed accepts a key under a different user than before. */
+export function onAccessUserChange(listener) {
+  acceptedUserListener = typeof listener === 'function' ? listener : () => {};
+}
 
 /**
  * Bind an optional access key to the feed's origin. The Authorization header is only ever attached
- * to requests whose origin equals that origin; an empty key yields no header at all.
+ * to requests whose origin equals that origin; an empty key yields no header at all. A key is sent
+ * as user "slums" (player keys) or "slumsdev" (the dev key): when the feed's own origin refuses one
+ * user, the request is repeated once as the other, and the user that worked is remembered.
  */
 export function feedAccess(feedUrl, accessKey = '') {
   const key = typeof accessKey === 'string' ? accessKey : '';
+  const origin = networkURL(feedUrl).origin;
+  const slot = key ? userSlot(origin, key) : '';
+  const user = (slot && acceptedUsers.get(slot)) || ACCESS_KEY_USER;
+  const other = user === ACCESS_KEY_USER ? DEV_ACCESS_USER : ACCESS_KEY_USER;
   return Object.freeze({
-    origin: networkURL(feedUrl).origin,
-    authorization: key ? `Basic ${Buffer.from(`${ACCESS_KEY_USER}:${key}`, 'utf8').toString('base64')}` : '',
+    origin,
+    authorization: key ? basicHeader(user, key) : '',
+    alternate: key ? Object.freeze({ user: other, authorization: basicHeader(other, key) }) : null,
+    accepted(acceptedUser) {
+      if (!slot || acceptedUsers.get(slot) === acceptedUser) return;
+      acceptedUsers.set(slot, acceptedUser);
+      try { acceptedUserListener(acceptedUser); } catch { /* persistence is best effort */ }
+    },
   });
 }
 
@@ -283,11 +314,13 @@ async function request(input, signal, access = null, extraHeaders = {}) {
   // The key is sent only while the chain stays on the feed's origin. A redirect to any other origin
   // drops it for the rest of the chain, even if a later hop points back, so no other host sees it.
   let trusted = Boolean(access?.authorization);
+  let authorization = access?.authorization ?? '';
+  let switched = false;
   for (let redirects = 0; redirects <= 5; redirects += 1) {
     if (secure && url.protocol !== 'https:') throw permanent(new Error('An HTTPS release cannot redirect to HTTP.'));
     if (url.origin !== access?.origin) trusted = false;
     const headers = { 'Accept-Encoding': 'identity', ...extraHeaders };
-    if (trusted) headers.Authorization = access.authorization;
+    if (trusted) headers.Authorization = authorization;
     const response = await fetch(url, { redirect: 'manual', signal, headers });
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       await response.body?.cancel();
@@ -298,13 +331,23 @@ async function request(input, signal, access = null, extraHeaders = {}) {
     }
     if (!response.ok) {
       await response.body?.cancel();
-      // 401/403 from the feed means a missing or wrong key; it is permanent, so never retried.
-      if ((response.status === 401 || response.status === 403) && access && url.origin === access.origin) throw accessDenied(response.status);
+      // 401/403 from the feed means a missing or wrong key. The key is tried once more under the
+      // other user name (player "slums" / dev "slumsdev"), on this same feed URL only; then it is permanent.
+      if ((response.status === 401 || response.status === 403) && access && url.origin === access.origin) {
+        if (trusted && !switched && access.alternate) {
+          switched = true;
+          authorization = access.alternate.authorization;
+          redirects -= 1;
+          continue;
+        }
+        throw accessDenied(response.status);
+      }
       const error = new Error(`Release request failed: HTTP ${response.status} ${response.statusText}.`);
       error.status = response.status;
       if (response.status < 500 && ![408, 425, 429].includes(response.status)) permanent(error);
       throw error;
     }
+    if (switched && trusted) access.accepted(access.alternate.user);
     return { response, url };
   }
   throw permanent(new Error('Release request exceeded the redirect limit.'));

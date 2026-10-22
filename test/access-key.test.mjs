@@ -118,10 +118,11 @@ test('once a redirect chain leaves the feed origin the key is not re-attached wh
 
 test('401 from the feed produces the access-key error and is never retried', async (t) => {
   const f = await fixture(t);
-  for (const accessKey of ['', 'wrong']) {
+  // No key: one request. A wrong key: one request per user name ("slums", then the dev key's "slumsdev"), never more.
+  for (const [accessKey, requests] of [['', 1], ['wrong', 2]]) {
     f.feedRequests.length = 0;
     await assert.rejects(loadRelease(f.url, { accessKey }), (error) => error.message === ACCESS_KEY_MESSAGE && error.code === 'ACCESS_KEY_REQUIRED' && error.permanent);
-    assert.equal(f.feedRequests.length, 1);
+    assert.equal(f.feedRequests.length, requests);
   }
 });
 
@@ -133,7 +134,8 @@ test('a download rejected with 401 (key revoked mid-install) stops immediately w
   f.feedRequests.length = 0;
   await assert.rejects(installRelease(f.install, release, () => {}, { retries: 4, retryDelayMs: 1, concurrency: 1 }),
     (error) => error.message === ACCESS_KEY_MESSAGE);
-  assert.equal(f.feedRequests.length, 1);
+  // The one file request plus its single retry under the other user name; no download retries.
+  assert.equal(f.feedRequests.length, 2);
 });
 
 test('a saved key overrides the built-in key; the built-in key is used only for the built-in feed', async (t) => {
