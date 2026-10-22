@@ -55,20 +55,21 @@ pub fn after_update(app: AppHandle, parent: Option<u32>) {
                     .run_on_main_thread({
                         let app = register_app.clone();
                         move || {
+                            // Without the lock this window still works; only a second
+                            // launch would open a second window. Never quit a healthy launcher.
                             if let Err(error) = app.plugin(plugin()) {
                                 eprintln!("Could not register updated launcher: {error}");
-                                app.exit(1);
                             }
                         }
                     })
                     .map_err(|e| slums_core::Error::new(e.to_string()))
             },
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(120),
         )
         .await;
         if let Err(error) = result {
+            // The old launcher is slow to exit: keep running without single-instance ownership.
             eprintln!("{}", error.message);
-            app.exit(1);
         }
     });
 }

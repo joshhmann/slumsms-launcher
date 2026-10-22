@@ -149,11 +149,18 @@ pub async fn request(input: &str, cancel: &CancellationToken, access: Option<&Fe
     Err(Error::permanent("Release request exceeded the redirect limit."))
 }
 
-/// Read a small JSON document with a size limit and a total request/body deadline.
-/// None uses METADATA_TIMEOUT; availability probes can supply a shorter deadline.
+/// Read a small JSON document with a size limit.
+/// With `timeout` (availability probes) the whole read has that deadline. Without one, the read may
+/// take as long as it keeps moving (the base layer manifest is ~18 MB, slow on a home link), but the
+/// answer must start, and every chunk must follow, within METADATA_TIMEOUT.
 pub async fn read_bytes(input: &str, label: &str, access: Option<&FeedAccess>, cancel: &CancellationToken, timeout: Option<Duration>) -> Result<(Vec<u8>, Url)> {
+    let timed_out = || Error { message: "Could not reach the update server (timed out).".into(), network: true, ..Default::default() };
+    let stall = if timeout.is_some() { Duration::MAX } else { METADATA_TIMEOUT };
     let work = async {
-        let (mut response, url) = request(input, cancel, access, &[]).await?;
+        let (mut response, url) = match tokio::time::timeout(stall.min(METADATA_TIMEOUT), request(input, cancel, access, &[])).await {
+            Ok(result) => result?,
+            Err(_) => return Err(timed_out()),
+        };
         if response.content_length().is_some_and(|n| n as usize > MAX_MANIFEST_BYTES) {
             return Err(Error::permanent(format!("{label} is too large.")));
         }
@@ -162,7 +169,10 @@ pub async fn read_bytes(input: &str, label: &str, access: Option<&FeedAccess>, c
             let chunk = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return Err(cancelled(cancel)),
-                c = response.chunk() => c.map_err(network_error)?,
+                c = tokio::time::timeout(stall, response.chunk()) => match c {
+                    Err(_) => return Err(timed_out()),
+                    Ok(c) => c.map_err(network_error)?,
+                },
             };
             let Some(chunk) = chunk else { break };
             bytes.extend_from_slice(&chunk);
@@ -172,9 +182,10 @@ pub async fn read_bytes(input: &str, label: &str, access: Option<&FeedAccess>, c
         }
         Ok((bytes, url))
     };
-    tokio::time::timeout(timeout.unwrap_or(METADATA_TIMEOUT), work).await.unwrap_or_else(|_| {
-        Err(Error { message: "Could not reach the update server (timed out).".into(), network: true, ..Default::default() })
-    })
+    match timeout {
+        Some(limit) => tokio::time::timeout(limit, work).await.unwrap_or_else(|_| Err(timed_out())),
+        None => work.await,
+    }
 }
 
 pub fn parse_json(bytes: &[u8], label: &str) -> Result<serde_json::Value> {
