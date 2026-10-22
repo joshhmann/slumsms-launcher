@@ -47,7 +47,8 @@ ssh root@192.168.0.164 'mkdir -p /opt/slums-tools/launcher-tauri-publisher /srv/
 N=/opt/slums-tools/node/bin/node
 P=/opt/slums-tools/launcher-tauri-publisher/tools/publish.mjs
 
-# 1. (prerequisite) the dev tier: docs/nginx-dev-tier.md steps 1-4 — owner creates the slumsdev key.  [GO]
+# 1. (prerequisite, FIRST) the dev tier: docs/nginx-dev-tier.md steps 1-4 — owner creates the slumsdev key.  [GO]
+#    Everything below assumes /launcher-test/ already accepts only slumsdev.
 
 # 2. dry run: publish into a throwaway copy, inspect, delete
 rm -rf /tmp/tauri-dryrun && mkdir -p /tmp/tauri-dryrun/launcher-test
@@ -123,30 +124,57 @@ Use a NEW folder, e.g. `Z:\MSv83\SlumsMS-dev\launcher-tauri-testrun\`. **Don't**
    - The test run's Live folder is `%LOCALAPPDATA%\SlumsMS` (its default), never
      `testlauncherblehbleh`, unless you choose it.
 
-## Electron hand-over on the Test channel
+## Electron hand-over on the Test channel (after the nginx change)
 
-1. **Key baked in:** yes for Live, optional for this trial.
-   - For Live it is required: friends without a saved key rely on the key built into the Electron
-     build, and the Tauri migration carries that built-in key over.
-   - `publish.mjs --launcher` refuses a build without one unless `--allow-no-access-key` is given.
-   - If the owner's own Electron launcher has the key saved in Settings, the trial can use a
-     no-key build: `--allow-no-access-key`, Test channel only.
-   - Baking the key is the owner's job:
-     1. On Silvia, in a checkout of `launcher-handover`, put the key into `src/launcher.config.json`
-        `accessKey`.
-     2. Run `npm ci && npm run build:win`.
-     3. Revert the file. Never commit the key.
+`launcher-handover` 08ce3d6 adds the dev-key retry. If the feed's own origin refuses user `slums`,
+the request is repeated once as `slumsdev`, and the user that worked is remembered. So an
+Electron 1.5.0 with the dev key reaches `/launcher-test/` after the nginx dev tier.
+
+Electron 1.3.x/1.4.x builds don't have the retry. After the nginx change, an old Electron
+launcher pointed at `/launcher-test/` gets 401 and never receives the hand-over build through the
+channel. The trial therefore starts from a hand-built Electron 1.5.0. That doesn't weaken the
+test: the step from 1.3.x to 1.5.0 is the existing, proven Electron self-update, and on Live it
+keeps working because Live still accepts `slums` with the player key.
+
+Order: run this after Test step 3 above (Tauri 1.5.0 in `launcher-test/tauri/`). Live stays
+untouched, and nothing is published for this part.
+
+1. **Build** (owner, on Silvia, in a new folder):
+
+   ```
+   git clone -b launcher-handover <repo> Z:\MSv83\SlumsMS-dev\launcher-handover-trial
+   cd Z:\MSv83\SlumsMS-dev\launcher-handover-trial
+   npm ci && npm run build:win
+   ```
+
+   - No key needs baking for this trial: the dev key is typed into Settings in step 3. The
+     Tauri migration carries a saved key over the same way as a built-in one.
+   - The Live hand-over build **does** need the friends key baked in. Friends without a saved key
+     rely on it, and `publish.mjs --launcher` refuses a build without one. Only the owner bakes it:
+     put the key into `src/launcher.config.json` `accessKey`, run `npm run build:win`, revert the
+     file, never commit it.
    - I have not read `/root/slums-patch-access-key.txt`.
-2. **User-name catch:** the Electron launcher always sends user `slums`.
-   - After the nginx dev tier, `/launcher-test/` accepts only `slumsdev`, so **no Electron launcher
-     can reach the Test channel**. It can't self-update to the hand-over build, and the hand-over
-     can't fetch `launcher-test/tauri/launcher.json`.
-   - Either run the Electron hand-over trial **before** the nginx change, or add a `slumsdev`
-     retry to the hand-over build. That second option needs a decision; it is not implemented.
-3. **Publishing the hand-over build:**
+2. **Unpack** `dist\win-unpacked` into a new folder, e.g. `Z:\MSv83\SlumsMS-dev\handover-trial\`.
+3. **Start it with the Test feed.** This uses the Electron settings in
+   `%APPDATA%\mapleroot-launcher`, the same as your everyday Electron. Back that file up first,
+   and note that `--feed-url` takes effect only for this run:
 
    ```
-   node … publish.mjs --launcher <dist/win-unpacked> --out /srv/slums-patch/launcher-test [--allow-no-access-key]
+   copy %APPDATA%\mapleroot-launcher\settings.json %APPDATA%\mapleroot-launcher\settings.json.bak-handover-trial
+   "SlumsMS Launcher.exe" --feed-url=https://slumspatch.asslorde.com/launcher-test/manifest.json --install-dir=Z:\MSv83\SlumsMS-dev\handover-trial-game
    ```
 
-   It has to come after Tauri 1.5.0 is in `launcher-test/tauri/`.
+   - Settings > Access key: enter the **dev key**.
+   - Expected: the log (`%APPDATA%\mapleroot-launcher\launcher.log`) says the server accepts the
+     key as user "slumsdev". Then "Moving to the new launcher…", and the Tauri 1.5.0 window replaces
+     it.
+   - `.slumsms-launcher-update\electron-rollback\SlumsMS Launcher.exe` is in the trial folder.
+4. **Check the Tauri window:** CHANNEL shows the picker, and the key is "saved".
+5. **Afterwards:**
+   - put back `settings.json` from the `.bak-handover-trial` copy;
+   - check that `Z:\MSv83\testlauncherblehbleh` is unchanged (the step-6 checks above).
+
+   Your everyday Electron launcher and its folder are not involved.
+
+Publishing the hand-over build to a channel (`publish.mjs --launcher … --out /srv/slums-patch/<channel>`)
+is a later step for Live. It must always come after Tauri is in that channel's `tauri/`.
