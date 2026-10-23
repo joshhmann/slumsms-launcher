@@ -1,8 +1,9 @@
-import { createHash, createPublicKey, verify } from 'node:crypto';
+import { createPublicKey, verify } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import { readFeedBytes, releaseURL, launcherVersion } from './updater.mjs';
+import { blake2b512 } from './blake2b.mjs';
 
 /**
  * Hand-over to the Tauri launcher (1.5.0). This is the last Electron release: it reaches players
@@ -85,7 +86,8 @@ export function verifyTauriSignature(bytes, signatureBase64, publicKeyBase64, ex
   if (!sigRaw.subarray(2, 10).equals(keyRaw.subarray(2, 10))) throw new Error('The launcher was signed with a different key.');
   const key = ed25519Key(keyRaw.subarray(10));
   const signature = sigRaw.subarray(10);
-  const message = algorithm === 'ED' ? createHash('blake2b512').update(bytes).digest() : Buffer.from(bytes);
+  // BLAKE2b in JS: Electron's BoringSSL has no blake2b512 ("Digest method not supported").
+  const message = algorithm === 'ED' ? blake2b512(bytes) : Buffer.from(bytes);
   if (!verify(null, message, key, signature)) throw new Error('The launcher signature does not match the download.');
   const trusted = sigLines[at].slice('trusted comment: '.length);
   const globalSig = Buffer.from(sigLines[at + 1].trim(), 'base64');
