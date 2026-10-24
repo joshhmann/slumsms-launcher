@@ -6,7 +6,7 @@ use crate::platform;
 use crate::VERSION;
 use serde_json::{json, Map, Value};
 use slums_core::channels::{accessible_channels, change_folder, channel_feed, channel_install_dir, effective_channel, folder_owner, probe_channels, show_channel_picker, update_manifest_url, Channel, Probes, CHANNELS};
-use slums_core::config::{detect_bundled_client, clean_access_key, effective_access_key, read_launcher_config, standalone_install_dir, valid_access_key, validate_feed_url, LauncherConfig};
+use slums_core::config::{builtin_access_key, detect_bundled_client, clean_access_key, effective_access_key, read_launcher_config, standalone_install_dir, valid_access_key, validate_feed_url, LauncherConfig};
 use slums_core::error::{ACCESS_KEY_REQUIRED, CONFIG_MISSING, GAME_RUNNING};
 use slums_core::game_config::{game_running, read_game_config, write_game_config};
 use slums_core::game_options::{default_values, validate_changes};
@@ -273,7 +273,7 @@ impl Launcher {
             feed_url: channel_feed(&live_feed, channel),
             install_dir: channel_install_dir(channel, &s.folders, &self.bundled_dir, &self.standalone_dir),
             channel,
-            key: effective_access_key(&s.access_key, &self.config.access_key, &live_feed, &self.config.feed_url),
+            key: effective_access_key(&s.access_key, builtin_access_key(&self.config.access_key, &s.builtin_access_key), &live_feed, &self.config.feed_url),
             user: if s.access_user.is_empty() { ACCESS_KEY_USER.to_string() } else { s.access_user.clone() },
             live_feed,
         }
@@ -364,6 +364,7 @@ impl Launcher {
         if needs_migration {
             self.migrate().await;
         }
+        self.keep_builtin_key();
         let _ = self.ready_tx.send(true);
         self.refresh_channels().await;
         let _ = self.probed_tx.send(true);
@@ -378,6 +379,25 @@ impl Launcher {
                 }
             }
         });
+    }
+
+    /// A friends build stores its built-in key in the settings, so the normal signed builds it
+    /// self-updates to (which carry no key) keep working without the player typing it.
+    fn keep_builtin_key(&self) {
+        let key = self.config.access_key.trim();
+        if key.is_empty() {
+            return;
+        }
+        let settings = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.settings.builtin_access_key == key {
+                return;
+            }
+            inner.settings.builtin_access_key = key.to_string();
+            inner.settings.clone()
+        };
+        self.persist(&settings);
+        self.log("Settings: stored the built-in access key for later launcher updates.");
     }
 
     /// Carry the Electron launcher's settings over once. Its file is only read; the game folder
@@ -1023,6 +1043,7 @@ impl Launcher {
         };
         // Whether a key is saved, never the key.
         settings["accessKey"] = json!(if settings["accessKey"].as_str().unwrap_or("").is_empty() { "" } else { "(saved)" });
+        settings["builtinAccessKey"] = json!(if settings["builtinAccessKey"].as_str().unwrap_or("").is_empty() { "" } else { "(saved)" });
         let value = json!({
             "steps": steps,
             "settings": settings,

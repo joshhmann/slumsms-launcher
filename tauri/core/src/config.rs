@@ -62,6 +62,17 @@ pub fn effective_access_key(saved: &str, default_key: &str, feed_url: &str, defa
     }
 }
 
+/// The built-in key: the exe's own (launcher.config.json `accessKey`), else the one an earlier
+/// friends build stored in the settings so a self-update to a build without a key keeps it. Either
+/// way it goes through `effective_access_key`, so it is only sent to the built-in feed's origin.
+pub fn builtin_access_key<'a>(config_key: &'a str, carried: &'a str) -> &'a str {
+    if config_key.trim().is_empty() {
+        carried
+    } else {
+        config_key
+    }
+}
+
 /// Apply config files in order (later override earlier); `None` text means the file is missing.
 pub fn read_launcher_config(files: &[(String, Option<String>)]) -> Result<LauncherConfig> {
     let mut config = LauncherConfig::default();
@@ -115,6 +126,21 @@ mod tests {
 
     fn file(label: &str, text: Option<&str>) -> (String, Option<String>) {
         (label.into(), text.map(str::to_string))
+    }
+
+    #[test]
+    fn a_built_in_key_survives_an_update_to_a_build_without_one() {
+        let live = "https://slumspatch.asslorde.com/manifest.json";
+        // 1.5.2 for friends: its own key. 1.5.3 (no key built in): the key 1.5.2 stored.
+        assert_eq!(builtin_access_key("friends", ""), "friends");
+        assert_eq!(builtin_access_key("friends", "older"), "friends");
+        assert_eq!(builtin_access_key("", "friends"), "friends");
+        assert_eq!(builtin_access_key("  ", "friends"), "friends");
+        assert_eq!(effective_access_key("", builtin_access_key("", "friends"), live, live), "friends");
+        assert_eq!(effective_access_key("", builtin_access_key("", "friends"), "https://slumspatch.asslorde.com/launcher-test/manifest.json", live), "friends");
+        // Still never sent to another server, and a saved key still wins.
+        assert_eq!(effective_access_key("", builtin_access_key("", "friends"), "https://other.example/manifest.json", live), "");
+        assert_eq!(effective_access_key("typed", builtin_access_key("", "friends"), live, live), "typed");
     }
 
     #[test]

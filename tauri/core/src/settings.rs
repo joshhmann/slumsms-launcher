@@ -38,6 +38,11 @@ pub struct Settings {
     pub feed_url: String,
     #[serde(default)]
     pub access_key: String,
+    /// The key built into a friends build, kept so a self-update to a build without one still has
+    /// it. Treated like a built-in key (config::builtin_access_key): only for the built-in feed's
+    /// origin, never shown or logged.
+    #[serde(default)]
+    pub builtin_access_key: String,
     /// The Basic-auth user the server accepted for this key ("slums" or "slumsdev").
     #[serde(default)]
     pub access_user: String,
@@ -64,6 +69,7 @@ impl Default for Settings {
             settings_version: 2,
             feed_url: String::new(),
             access_key: String::new(),
+            builtin_access_key: String::new(),
             access_user: String::new(),
             channel: Channel::Live,
             folders: Folders::default(),
@@ -86,6 +92,9 @@ pub fn read_settings(text: &str) -> Settings {
         if let Some(v) = value.get("accessKey").and_then(Value::as_str) {
             s.access_key = v.into();
         }
+        if let Some(v) = value.get("builtinAccessKey").and_then(Value::as_str) {
+            s.builtin_access_key = v.into();
+        }
         if let Some(c) = value.get("channel").and_then(Value::as_str).and_then(Channel::parse) {
             s.channel = c;
         }
@@ -96,6 +105,7 @@ pub fn read_settings(text: &str) -> Settings {
         s
     });
     settings.access_key = clean_access_key(&settings.access_key).unwrap_or_default();
+    settings.builtin_access_key = clean_access_key(&settings.builtin_access_key).unwrap_or_default();
     settings.settings_version = 2;
     settings
 }
@@ -389,6 +399,11 @@ mod tests {
         assert_eq!((odd.channel, odd.access_key.as_str(), odd.folders.live.as_str()), (Channel::Live, "", "C:\\L"));
         assert_eq!(read_settings("garbage"), Settings::default());
         assert_eq!(read_settings(r#"{ "accessKey": " pasted\r\n" }"#).access_key, "pasted", "a key saved with a line break still works");
+        // A friends build's key, stored for later updates, round-trips and survives a malformed file.
+        let carried = Settings { builtin_access_key: "friends".into(), ..Default::default() };
+        assert_eq!(read_settings(&serde_json::to_string(&carried).unwrap()), carried);
+        assert_eq!(read_settings(r#"{ "builtinAccessKey": "friends", "folders": 3 }"#).builtin_access_key, "friends");
+        assert_eq!(read_settings(r#"{ "builtinAccessKey": "bad\u0001" }"#).builtin_access_key, "");
         let m = migrate_legacy_settings(&json!({ "accessKey": "electron-key\n" }), LIVE, None, &Probes::new(), "");
         assert_eq!(m.settings.access_key, "electron-key");
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
