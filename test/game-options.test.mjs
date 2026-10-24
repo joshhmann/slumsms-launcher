@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { parseIni, serializeIni, readGameOptions, applyGameOptions, validateChanges, DEFAULT_VALUES, GAME_OPTIONS } from '../src/game-options.mjs';
+import { parseIni, serializeIni, getValue, readGameOptions, applyGameOptions, explicitGameOptions, validateChanges, DEFAULT_VALUES, GAME_OPTIONS } from '../src/game-options.mjs';
 import { readGameConfig, writeGameConfig, runningGameNames, gameRunning } from '../src/game-config.mjs';
 
 // A real player's config.ini (CRLF), plus things a player might add by hand.
@@ -112,12 +112,86 @@ test('legacy moveattack: slide off by default, jump and charge follow it; new ke
 });
 const pick = ({ attackwalk, attackjump, chargemove }) => ({ attackwalk, attackjump, chargemove });
 
-test('double-tap jump defaults on and is read and written like the others', () => {
-  assert.equal(readGameOptions('').values.doubletapjump, true);
-  const after = applyGameOptions(REAL, { doubletapjump: false });
-  assert.equal(readGameOptions(after).values.doubletapjump, false);
+test('double-tap jump defaults off and is read and written like the others', () => {
+  assert.equal(readGameOptions('').values.doubletapjump, false);
+  const after = applyGameOptions(REAL, { doubletapjump: true });
+  assert.equal(readGameOptions(after).values.doubletapjump, true);
   assert.ok(!/attackwalk|attackjump|chargemove/u.test(after), 'an unrelated change does not add the movement keys');
-  assert.equal(readGameOptions(applyGameOptions(after, { doubletapjump: true })).values.doubletapjump, true);
+  assert.equal(readGameOptions(applyGameOptions(after, { doubletapjump: false })).values.doubletapjump, false);
+  const option = GAME_OPTIONS.find((o) => o.id === 'doubletapjump');
+  assert.equal(option.description, 'Press jump again in mid-air to use your Ninja Bounce (air only). Off by default.');
+  assert.ok(!/Flash Jump/u.test(option.label + option.description));
+});
+
+// Every fallback is the client's own default for that key (client line client-1.5.0-fixes3):
+// - discord, winkey, nobulb, customcolor, jumpshoot, jumpmagic: mapleroot/ijl15/YourStuff.h doini(),
+//   reader.GetBoolean(section, key, "true") (a non-null char* default, so true);
+// - attackwalk / attackjump / chargemove: src/attackstop_patch.h ResolveMoveAttackSettings,
+//   attackWalk.value_or(false), attackJump/chargeMove.value_or(legacy), legacy = moveAttack.value_or(true);
+// - doubletapjump: src/bounce.cpp ReadIniBool("clienthax", "doubletapjump", false) (false since client
+//   1.5.0), read with GetPrivateProfileStringA;
+// - config.example.ini ships the same values.
+// Change this table only together with the client.
+const CLIENT_DEFAULTS = [
+  ['discord', 'discord', 'enableactivitystatus', true, undefined], // YourStuff.h
+  ['winkey', 'clienthax', 'enablewinkey', true, undefined],        // YourStuff.h
+  ['nobulb', 'clienthax', 'nobulb', true, undefined],              // YourStuff.h
+  ['customcolor', 'clienthax', 'customcolor', true, undefined],    // YourStuff.h
+  ['attackwalk', 'clienthax', 'attackwalk', false, undefined],     // attackstop_patch.h
+  ['attackjump', 'clienthax', 'attackjump', true, undefined],      // attackstop_patch.h (moveattack default true)
+  ['chargemove', 'clienthax', 'chargemove', true, undefined],      // attackstop_patch.h (moveattack default true)
+  ['doubletapjump', 'clienthax', 'doubletapjump', false, 'profile'], // bounce.cpp
+  ['jumpshoot', 'clienthax', 'jumpshoot', true, undefined],        // YourStuff.h
+  ['jumpmagic', 'clienthax', 'jumpmagic', true, undefined],        // YourStuff.h
+];
+
+test('every fallback matches the client default', async () => {
+  const page = await import('../tauri/ui/game-options.mjs');
+  for (const table of [GAME_OPTIONS, page.GAME_OPTIONS]) {
+    assert.equal(table.length, CLIENT_DEFAULTS.length);
+    for (const [id, section, key, fallback, reader] of CLIENT_DEFAULTS) {
+      const option = table.find((o) => o.id === id);
+      assert.deepEqual([option.section, option.key, option.fallback, option.reader], [section, key, fallback, reader], id);
+      assert.equal(readGameOptions('').values[id], fallback, id);
+    }
+  }
+  // The Tauri page and the Electron main process share one module text.
+  assert.equal(await readFile(new URL('../tauri/ui/game-options.mjs', import.meta.url), 'utf8'), await readFile(new URL('../src/game-options.mjs', import.meta.url), 'utf8'));
+});
+
+test('double-tap jump is read like GetPrivateProfileString and written without an inline comment', () => {
+  assert.equal(readGameOptions('[clienthax]\r\ndoubletapjump=true ; on please\r\n').values.doubletapjump, false);
+  assert.equal(readGameOptions('[clienthax]\ndoubletapjump=true\ndoubletapjump=false\n').values.doubletapjump, true);
+  assert.equal(readGameOptions('[clienthax]\ndoubletapjump = "on"\n').values.doubletapjump, true);
+  assert.equal(readGameOptions('[clienthax]\ndoubletapjump: true\n').values.doubletapjump, false);
+  const on = applyGameOptions('[clienthax]\r\ndoubletapjump=false ; off for now\r\nnobulb=true ; keep\r\n', { doubletapjump: true, nobulb: false });
+  assert.equal(on, '[clienthax]\r\ndoubletapjump=true\r\nnobulb=false ; keep\r\n');
+  assert.equal(applyGameOptions('[clienthax]\ndoubletapjump: false ; x\n', { doubletapjump: true }), '[clienthax]\ndoubletapjump=true\n');
+  assert.equal(applyGameOptions('[clienthax]\ndoubletapjump: x\ndoubletapjump=off\n', { doubletapjump: true }), '[clienthax]\ndoubletapjump=true\n');
+});
+
+test('every option is written explicitly with what the panel shows', () => {
+  const shown = readGameOptions(REAL).values;
+  const after = explicitGameOptions(REAL);
+  assert.deepEqual(readGameOptions(after).values, shown);
+  const ini = parseIni(after);
+  for (const option of GAME_OPTIONS) assert.notEqual(getValue(ini, option.section, option.key), undefined, option.id);
+  assert.ok(!after.includes('doubletapjump=true'));
+  // Every original line survives, in order; only new lines were added.
+  const old = REAL.split('\r\n');
+  let next = 0;
+  for (const line of after.split('\r\n')) if (line === old[next]) next += 1;
+  assert.equal(next, old.length);
+  assert.ok(after.includes('[config]\r\nhost=203.0.113.7\r\nport=8484\r\n'));
+  assert.ok(after.includes('[debug]\r\nattackdiag=1\r\n'));
+  assert.equal(after.match(/moveattack/gu).length, 1);
+  assert.ok(!/[^\r]\n/u.test(after), 'CRLF kept');
+  assert.equal(explicitGameOptions(after), after);
+  assert.ok(explicitGameOptions('[clienthax]\r\nNoBulb = yes ; mine\r\n').startsWith('[clienthax]\r\nNoBulb = yes ; mine\r\n'));
+  const junk = explicitGameOptions('[clienthax]\nnobulb=maybe\njumpshoot=false\n', { discord: false });
+  assert.deepEqual([junk.includes('nobulb=true\n'), readGameOptions(junk).values.jumpshoot, readGameOptions(junk).values.discord], [true, false, false]);
+  assert.deepEqual(pick(readGameOptions(explicitGameOptions('[clienthax]\nmoveattack=false\n')).values), { attackwalk: false, attackjump: false, chargemove: false });
+  assert.throws(() => explicitGameOptions(REAL, { host: true }), /Unknown game option/);
 });
 
 test('only known options with on/off values are accepted', () => {

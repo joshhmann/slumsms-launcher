@@ -620,7 +620,8 @@ impl Launcher {
         self.refresh_installed().await;
         self.send(json!({ "phase": "ready", "canPlay": true, "fresh": false, "pendingFiles": 0, "pendingBytes": 0, "message": "All release files verified. Ready to play." }));
         let me = self.clone();
-        tauri::async_runtime::spawn(async move { me.flush_pending_game_options().await });
+        let dir = e.install_dir.clone();
+        tauri::async_runtime::spawn(async move { me.write_options_explicitly(&dir).await });
         Ok(release)
     }
 
@@ -677,7 +678,8 @@ impl Launcher {
                 (release.launch.clone(), false)
             }
         };
-        self.flush_pending_game_options().await;
+        // The folder the game starts in is the folder whose config.ini it reads: write that one.
+        self.write_options_explicitly(&e.install_dir).await;
         self.send(json!({ "phase": "launching", "message": "Starting the client. Accept its Windows prompt if shown.", "canPlay": false }));
         self.inner.lock().unwrap().last_verified = None;
         let dir = e.install_dir.clone();
@@ -793,6 +795,8 @@ impl Launcher {
     // -----------------------------------------------------------------------------------------
     // Game options (config.ini). Writes are serialized; while the game runs, changes wait in the
     // settings (per game folder) and are written when the panel is opened later, or at Play.
+    // Opening the panel, Play and every save write all options explicitly, so the game never falls
+    // back to a client default that differs from what the panel shows.
 
     fn pending_for(&self, dir: &str) -> Option<BTreeMap<String, bool>> {
         self.inner.lock().unwrap().settings.pending_game_options.as_ref().filter(|p| p.install_dir == dir).map(|p| p.changes.clone())
@@ -807,10 +811,9 @@ impl Launcher {
         self.persist(&settings);
     }
 
-    fn game_options_state(&self, extra: Value) -> Cmd<Value> {
-        let dir = self.effective().install_dir;
-        let current = read_game_config(&dir).map_err(|e| e.message)?;
-        let pending = self.pending_for(&dir);
+    fn game_options_state(&self, dir: &str, extra: Value) -> Cmd<Value> {
+        let current = read_game_config(dir).map_err(|e| e.message)?;
+        let pending = self.pending_for(dir);
         let mut value = serde_json::to_value(&current).map_err(|e| e.to_string())?;
         if current.is_ok() {
             if let Some(pending) = &pending {
@@ -828,21 +831,25 @@ impl Launcher {
         Ok(value)
     }
 
-    async fn flush_pending_game_options(&self) {
+    /// Write every option into `dir`'s config.ini (the panel's values: the file's, else the client
+    /// default, plus changes saved while the game ran). Quietly does nothing while the game runs or
+    /// before the game is installed.
+    async fn write_options_explicitly(&self, dir: &str) {
         let _guard = self.options_lock.lock().await;
-        let dir = self.effective().install_dir;
-        let Some(pending) = self.pending_for(&dir) else { return };
-        match write_game_config(&dir, &pending, game_running) {
+        let pending = self.pending_for(dir);
+        match write_game_config(dir, &pending.clone().unwrap_or_default(), game_running) {
             Ok(_) => {
-                self.set_pending(None);
-                self.log("Game options: applied changes saved while the game was running.");
+                if pending.is_some() {
+                    self.set_pending(None);
+                    self.log("Game options: applied changes saved while the game was running.");
+                }
             }
             Err(error) => {
-                if error.is(CONFIG_MISSING) {
+                if error.is(CONFIG_MISSING) && pending.is_some() {
                     self.set_pending(None);
                 }
-                if !error.is(GAME_RUNNING) {
-                    self.log(&format!("Game options: could not apply saved changes: {}", error.message));
+                if !error.is(GAME_RUNNING) && (pending.is_some() || !error.is(CONFIG_MISSING)) {
+                    self.log(&format!("Game options: could not write config.ini: {}", error.message));
                 }
             }
         }
@@ -858,11 +865,11 @@ impl Launcher {
                 if self.pending_for(&dir).is_some() {
                     self.set_pending(None);
                 }
-                self.game_options_state(json!({ "saved": "written" }))
+                self.game_options_state(&dir, json!({ "saved": "written" }))
             }
             Err(error) if error.is(GAME_RUNNING) => {
-                self.set_pending(Some(PendingGameOptions { install_dir: dir, changes: merged }));
-                self.game_options_state(json!({ "saved": "pending" }))
+                self.set_pending(Some(PendingGameOptions { install_dir: dir.clone(), changes: merged }));
+                self.game_options_state(&dir, json!({ "saved": "pending" }))
             }
             Err(error) => Err(error.message),
         }
@@ -949,7 +956,7 @@ impl Launcher {
                 let dir = self.effective().install_dir;
                 let path = Path::new(&dir).join("config.ini");
                 let before = std::fs::read(&path).map_err(|e| format!("config.ini: {e}"))?;
-                let shown = self.game_options_state(json!({}))?;
+                let shown = self.game_options_state(&dir, json!({}))?;
                 let flipped = !shown["values"]["attackwalk"].as_bool().unwrap_or(false);
                 let saved = self.save_game_options([("attackwalk".to_string(), flipped)].into_iter().collect()).await?;
                 let after = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
@@ -1253,8 +1260,9 @@ pub async fn play(launcher: L<'_>) -> Cmd<()> {
 #[tauri::command]
 pub async fn game_options(launcher: L<'_>) -> Cmd<Value> {
     let l = launcher.inner().clone();
-    l.flush_pending_game_options().await;
-    l.game_options_state(json!({}))
+    let dir = l.effective().install_dir;
+    l.write_options_explicitly(&dir).await;
+    l.game_options_state(&dir, json!({}))
 }
 
 #[tauri::command]

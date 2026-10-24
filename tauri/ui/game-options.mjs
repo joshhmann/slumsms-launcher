@@ -9,9 +9,17 @@
  * are case-insensitive, `;`/`#` start a comment line, ` ;` starts an inline comment, a repeated key
  * (or an indented continuation line) joins values with a newline so the boolean no longer parses
  * and the client falls back to its default. Booleans are true/yes/on/1 and false/no/off/0.
+ *
+ * One key is read differently: slums.dll reads `doubletapjump` with Windows' GetPrivateProfileStringA
+ * (src/bounce.cpp ReadIniBool), which takes the first `key=value` line of the section and the whole
+ * rest of the line, so an inline comment makes the value unreadable. Such options carry
+ * `reader: 'profile'`; their value is read that way and written without an inline comment.
  */
 
-/** What the client does with each key, in player words. `fallback` is the client's value when the key is absent. */
+/**
+ * What the client does with each key, in player words. `fallback` is the client's value when the key
+ * is absent (pinned to the client source in test/game-options.test.mjs and the Rust core's tests).
+ */
 export const GAME_OPTIONS = Object.freeze([
   { id: 'discord', section: 'discord', key: 'enableactivitystatus', fallback: true, group: 'General',
     label: 'Show your game on Discord', description: 'Shows your character\'s name, level and job as your Discord status while you play.' },
@@ -27,8 +35,8 @@ export const GAME_OPTIONS = Object.freeze([
     label: 'Jump while attacking', description: 'Lets you jump in the middle of an attack instead of waiting for it to finish.' },
   { id: 'chargemove', section: 'clienthax', key: 'chargemove', fallback: true, group: 'Movement', legacy: 'follow',
     label: 'Move while charging skills', description: 'Lets you move while holding a charged or key-down skill (like Hurricane or Big Bang).' },
-  { id: 'doubletapjump', section: 'clienthax', key: 'doubletapjump', fallback: true, group: 'Movement',
-    label: 'Double-tap jump to Flash Jump', description: 'Press jump again in mid-air to bounce (Ninja Bounce, or Flash Jump for thieves). Doesn\'t work in jump quests.' },
+  { id: 'doubletapjump', section: 'clienthax', key: 'doubletapjump', fallback: false, group: 'Movement', reader: 'profile',
+    label: 'Double-tap jump to bounce', description: 'Press jump again in mid-air to use your Ninja Bounce (air only). Off by default.' },
   { id: 'jumpshoot', section: 'clienthax', key: 'jumpshoot', fallback: true, group: 'Movement',
     label: 'Shoot in mid-air', description: 'Lets bow, crossbow, claw and gun attacks fire while you are jumping.' },
   { id: 'jumpmagic', section: 'clienthax', key: 'jumpmagic', fallback: true, group: 'Movement',
@@ -134,6 +142,37 @@ export function getValue(ini, section, key) {
   return value;
 }
 
+/**
+ * What GetPrivateProfileStringA returns for a key: the first `key=value` line of the section (a ':'
+ * is not a separator), the rest of the line trimmed, one pair of surrounding quotes removed, no
+ * inline comments. undefined when absent.
+ */
+export function getProfileValue(ini, section, key) {
+  const line = profileLine(ini, section, key);
+  return line ? profileValueOf(line) : undefined;
+}
+
+function profileSeparator(line) {
+  const at = line.text.search(/[=:]/u);
+  return at >= 0 && line.text[at] === '=' ? at : -1;
+}
+
+function profileLine(ini, section, key) {
+  const wanted = keyOf(section, key);
+  return ini.lines.find((line) => line.kind === 'key' && line.key === wanted && profileSeparator(line) >= 0);
+}
+
+function profileValueOf(line) {
+  const value = rstrip(lskip(line.text.slice(profileSeparator(line) + 1)));
+  const quoted = value.length >= 2 && (value[0] === '"' || value[0] === "'") && value.at(-1) === value[0];
+  return quoted ? value.slice(1, -1) : value;
+}
+
+/** The value the client's reader for `option` sees. */
+function clientValue(ini, option) {
+  return option.reader === 'profile' ? getProfileValue(ini, option.section, option.key) : getValue(ini, option.section, option.key);
+}
+
 /** inih GetBoolean without a default: true, false, or null when absent or unreadable. */
 export function parseBoolean(value) {
   if (value === undefined) return null;
@@ -153,16 +192,21 @@ export function readGameOptions(text) {
   const legacy = parseBoolean(getValue(ini, LEGACY_MOVEATTACK.section, LEGACY_MOVEATTACK.key));
   const values = {};
   for (const option of GAME_OPTIONS) {
-    const own = parseBoolean(getValue(ini, option.section, option.key));
+    const own = parseBoolean(clientValue(ini, option));
     values[option.id] = own ?? (option.legacy === 'follow' ? (legacy ?? option.fallback) : option.fallback);
   }
   return { values, legacyMoveAttack: legacy, parseErrorLine: ini.parseErrorLine };
 }
 
-/** Keep the original key spelling, spacing and inline comment; replace only the value. */
-function rewriteValue(line, value) {
+/**
+ * Keep the original key spelling, spacing and inline comment; replace only the value. With
+ * `dropComment` (GetPrivateProfileString keys) the inline comment goes, since that reader would take
+ * it as part of the value.
+ */
+function rewriteValue(line, value, dropComment = false) {
   const match = /^(\s*[^=:]*?\s*[=:][ \t]*)(.*)$/su.exec(line.text);
   if (!match) return `${line.name}=${value}`;
+  if (dropComment) return match[1].trimEnd().endsWith('=') ? match[1] + value : `${line.name}=${value}`;
   const rest = match[2];
   const comment = findCharsOrComment(rest, null);
   const before = rest.slice(0, comment);
@@ -170,13 +214,21 @@ function rewriteValue(line, value) {
   return match[1] + value + rest.slice(comment - trailing);
 }
 
-/** Set one key: the first line keeps its place, repeats and continuations go, a new key joins the end of its section. */
-function setValue(ini, section, key, value) {
+/**
+ * Set one option: the first line keeps its place, repeats and continuations go, a new key joins the
+ * end of its section. A single line the client already reads as `on` is left byte-for-byte.
+ */
+function setValue(ini, option, on) {
+  const { section, key } = option;
+  const value = on ? 'true' : 'false';
   const wanted = keyOf(section, key);
   const matches = ini.lines.filter((line) => (line.kind === 'key' && line.key === wanted) || (line.kind === 'continuation' && line.owner.key === wanted));
+  if (matches.length === 1 && matches[0].kind === 'key' && parseBoolean(clientValue(ini, option)) === on) return;
   if (matches.length) {
-    const [first, ...rest] = matches;
-    first.text = rewriteValue(first, value);
+    // The first match is always a key line; for GetPrivateProfileString the line it reads is kept.
+    const first = (option.reader === 'profile' && profileLine(ini, section, key)) || matches[0];
+    const rest = matches.filter((line) => line !== first);
+    first.text = rewriteValue(first, value, option.reader === 'profile');
     first.value = value;
     ini.lines = ini.lines.filter((line) => !rest.includes(line));
     return;
@@ -218,9 +270,21 @@ export function applyGameOptions(text, changes) {
     const option = byId.get(id);
     if (!option) throw new Error(`Unknown game option: ${id}.`);
     if (typeof value !== 'boolean') throw new Error(`Game option ${id} must be on or off.`);
-    setValue(ini, option.section, option.key, value ? 'true' : 'false');
+    setValue(ini, option, value);
   }
   return serializeIni(ini);
+}
+
+/**
+ * Write every option explicitly: the value the client reads now (else its default), with `changes`
+ * on top. After this the file no longer depends on any client default, so what the launcher shows is
+ * what the game does whatever the client version. Lines the client already reads correctly are left
+ * byte-for-byte; `moveattack`, [config], [debug] and unknown keys are never touched.
+ */
+export function explicitGameOptions(text, changes = {}) {
+  const clean = validateChanges(changes);
+  const ini = parseIni(text);
+  return applyGameOptions(text, { ...readGameOptions(ini).values, ...clean });
 }
 
 /** Validate a change set from the page: known ids with boolean values only. */

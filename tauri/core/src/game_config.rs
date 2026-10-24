@@ -3,7 +3,7 @@
 //! address, so this module never creates it: a missing file is left to the install flow.
 
 use crate::error::{Error, Result, CONFIG_MISSING, GAME_RUNNING};
-use crate::game_options::{apply_game_options_map, read_game_options, validate_changes, GameOptions};
+use crate::game_options::{explicit_game_options, read_game_options, validate_changes, GameOptions};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -51,7 +51,10 @@ impl Serialize for GameConfig {
     }
 }
 
-fn config_path(install_dir: &Path) -> PathBuf {
+/// The config.ini the game reads. Every reader in the client opens a relative path (`config.ini`,
+/// `.\\config.ini`) and the launcher starts the game with the game folder as its working directory
+/// (play::launch), so this is the file for that folder, and the same folder must be passed to both.
+pub fn config_path(install_dir: &Path) -> PathBuf {
     install_dir.join(CONFIG_FILE)
 }
 
@@ -85,10 +88,13 @@ fn failure(message: impl Into<String>, code: &'static str) -> Error {
     Error::new(message).with_code(code)
 }
 
-/// Apply `{ id: on }` to config.ini. Refuses while the game runs (it reads the file only at start-up
-/// and some players' clients write it back) and when the file is missing. The new file is written
-/// beside the old one and renamed over it, so a crash leaves the old or the new file, never half of
-/// one. Returns the options as the client will now read them.
+/// Apply `{ id: on }` to config.ini and write every other option explicitly too, at the value the
+/// client reads now (else its default; see game_options::explicit_game_options). An empty map just
+/// makes the file explicit; the file is not rewritten when nothing changes. Refuses while the game
+/// runs (it reads the file only at start-up and some players' clients write it back) and when the
+/// file is missing. The new file is written beside the old one and renamed over it, so a crash
+/// leaves the old or the new file, never half of one. Returns the options as the client will now
+/// read them.
 pub fn write_game_config(install_dir: &str, changes: &BTreeMap<String, bool>, is_game_running: impl FnOnce() -> bool) -> Result<GameConfig> {
     let clean = validate_changes(&serde_json::to_value(changes).expect("map serializes"))?;
     if install_dir.is_empty() {
@@ -99,7 +105,7 @@ pub fn write_game_config(install_dir: &str, changes: &BTreeMap<String, bool>, is
     }
     let dir = Path::new(install_dir);
     let before = read_text(dir)?.ok_or_else(|| failure(format!("{CONFIG_FILE} is missing from the game folder. Install or repair the game first."), CONFIG_MISSING))?;
-    let after = apply_game_options_map(&before, &clean)?;
+    let after = explicit_game_options(&before, &clean)?;
     if after != before {
         let temporary = dir.join(format!(".{CONFIG_FILE}.{}.tmp", uuid::Uuid::new_v4()));
         let result = (|| -> std::io::Result<()> {
@@ -183,7 +189,8 @@ fn process_list() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game_options::apply_game_options_map;
+    use crate::channels::{channel_install_dir, Channel, Folders, CHANNELS};
+    use crate::game_options::{explicit_game_options, GAME_OPTIONS};
 
     fn real() -> String {
         [
@@ -258,7 +265,7 @@ mod tests {
         assert!(result.values["attackwalk"]);
         let written = std::fs::read(dir.0.join(CONFIG_FILE)).unwrap();
         assert_eq!(written[..20], original[..20]); // the non-UTF-8 bytes are untouched
-        assert_eq!(written, apply_game_options_map(&original, &wanted).unwrap());
+        assert_eq!(written, explicit_game_options(&original, &wanted).unwrap());
         assert_eq!(dir.entries(), vec![CONFIG_FILE.to_string()]);
         assert_eq!(read_game_config(dir.s()).unwrap().values, result.values);
         let json = serde_json::to_value(read_game_config(dir.s()).unwrap()).unwrap();
@@ -266,6 +273,67 @@ mod tests {
         assert_eq!(json["legacyMoveAttack"], true);
         assert_eq!(json["parseErrorLine"], 0);
         assert_eq!(json["values"]["nobulb"], false);
+    }
+
+    #[test]
+    fn an_empty_change_set_writes_every_option_explicitly_and_only_once() {
+        let dir = Folder::new(Some(real().as_bytes()));
+        let shown = read_game_config(dir.s()).unwrap().values;
+        assert!(!shown["doubletapjump"], "the client default is off");
+        let written = write_game_config(dir.s(), &BTreeMap::new(), || false).unwrap();
+        assert_eq!(written.values, shown);
+        let text = String::from_utf8(std::fs::read(dir.0.join(CONFIG_FILE)).unwrap()).unwrap();
+        for option in GAME_OPTIONS {
+            assert!(text.to_lowercase().contains(&format!("{}=", option.key)), "{} written: {text}", option.key);
+        }
+        assert!(text.contains("doubletapjump=false\r\n"));
+        assert!(text.contains("[config]\r\nhost=203.0.113.7\r\nport=8484\r\n"));
+        // A second pass finds nothing to change and leaves the file alone.
+        let modified = std::fs::metadata(dir.0.join(CONFIG_FILE)).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_game_config(dir.s(), &BTreeMap::new(), || false).unwrap();
+        assert_eq!(std::fs::metadata(dir.0.join(CONFIG_FILE)).unwrap().modified().unwrap(), modified);
+        assert_eq!(dir.entries(), vec![CONFIG_FILE.to_string()]);
+    }
+
+    /// The launcher reads and writes the config.ini of the folder the selected channel launches from,
+    /// and the game started there (working directory = that folder, like the client's relative
+    /// `.\\config.ini`) sees exactly that file. Other channels' files are untouched.
+    #[cfg(unix)]
+    #[test]
+    fn each_channel_reads_writes_and_launches_with_its_own_config_ini() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = Folder::new(None);
+        let live = root.0.join("SlumsMS");
+        let folders = Folders { live: live.to_string_lossy().into_owned(), ..Default::default() };
+        let dirs: Vec<(Channel, String)> = CHANNELS.into_iter().map(|c| (c, channel_install_dir(c, &folders, "", ""))).collect();
+        for (_, dir) in &dirs {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(Path::new(dir).join(CONFIG_FILE), real()).unwrap();
+            // A stand-in game that copies the config.ini it sees (relative path, like the client).
+            let game = Path::new(dir).join("SlumsMS.exe");
+            std::fs::write(&game, "#!/bin/sh\ncp config.ini seen.ini\n").unwrap();
+            std::fs::set_permissions(&game, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (channel, test_dir) = dirs.iter().find(|(c, _)| *c == Channel::Test).unwrap();
+        assert!(test_dir.ends_with("SlumsMS-test"), "{channel:?} {test_dir}");
+        write_game_config(test_dir, &changes(&[("doubletapjump", true)]), || false).unwrap();
+        assert!(read_game_config(test_dir).unwrap().values["doubletapjump"]);
+        for (other, dir) in &dirs {
+            if other != channel {
+                assert_eq!(std::fs::read(Path::new(dir).join(CONFIG_FILE)).unwrap(), real().as_bytes(), "{other:?} untouched");
+                assert!(!read_game_config(dir).unwrap().values["doubletapjump"]);
+            }
+        }
+        crate::play::launch(test_dir, "SlumsMS.exe", &[]).unwrap();
+        let seen = Path::new(test_dir).join("seen.ini");
+        let started = std::time::Instant::now();
+        while !seen.exists() && started.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(std::fs::read(&seen).unwrap(), std::fs::read(config_path(Path::new(test_dir))).unwrap());
+        assert!(crate::game_options::read_game_options(&std::fs::read(&seen).unwrap()).values["doubletapjump"]);
     }
 
     #[test]

@@ -9,6 +9,12 @@
 //! are case-insensitive, `;`/`#` start a comment line, ` ;` starts an inline comment, a repeated key
 //! (or an indented continuation line) joins values with a newline so the boolean no longer parses
 //! and the client falls back to its default. Booleans are true/yes/on/1 and false/no/off/0.
+//!
+//! One key is read differently: slums.dll reads `doubletapjump` with Windows'
+//! GetPrivateProfileStringA (src/bounce.cpp ReadIniBool), which takes the first `key=value` line of
+//! the section and the whole rest of the line, so an inline comment makes the value unreadable.
+//! Such options are marked `Reader::Profile`; their value is read that way and written without an
+//! inline comment.
 
 use crate::error::{Error, Result};
 use serde::Serialize;
@@ -25,6 +31,16 @@ pub enum Legacy {
     Follow,
 }
 
+/// Which of the client's two INI readers reads a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Reader {
+    /// MapleRoot's inih INIReader (mapleroot/ijl15/INIReader.h).
+    Inih,
+    /// Windows GetPrivateProfileStringA (src/bounce.cpp ReadIniBool).
+    Profile,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct GameOption {
     pub id: &'static str,
@@ -34,16 +50,22 @@ pub struct GameOption {
     pub group: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub legacy: Option<Legacy>,
+    pub reader: Reader,
     pub label: &'static str,
     pub description: &'static str,
 }
 
 #[allow(clippy::too_many_arguments)]
 const fn option(id: &'static str, section: &'static str, key: &'static str, fallback: bool, group: &'static str, legacy: Option<Legacy>, label: &'static str, description: &'static str) -> GameOption {
-    GameOption { id, section, key, fallback, group, legacy, label, description }
+    GameOption { id, section, key, fallback, group, legacy, reader: Reader::Inih, label, description }
 }
 
-/// What the client does with each key, in player words. `fallback` is the client's value when the key is absent.
+const fn profile(option: GameOption) -> GameOption {
+    GameOption { reader: Reader::Profile, ..option }
+}
+
+/// What the client does with each key, in player words. `fallback` is the client's value when the
+/// key is absent (pinned to the client source by `fallbacks_match_the_client` below).
 pub const GAME_OPTIONS: [GameOption; 10] = [
     option("discord", "discord", "enableactivitystatus", true, "General", None,
         "Show your game on Discord", "Shows your character's name, level and job as your Discord status while you play."),
@@ -59,8 +81,8 @@ pub const GAME_OPTIONS: [GameOption; 10] = [
         "Jump while attacking", "Lets you jump in the middle of an attack instead of waiting for it to finish."),
     option("chargemove", "clienthax", "chargemove", true, "Movement", Some(Legacy::Follow),
         "Move while charging skills", "Lets you move while holding a charged or key-down skill (like Hurricane or Big Bang)."),
-    option("doubletapjump", "clienthax", "doubletapjump", true, "Movement", None,
-        "Double-tap jump to Flash Jump", "Press jump again in mid-air to bounce (Ninja Bounce, or Flash Jump for thieves). Doesn't work in jump quests."),
+    profile(option("doubletapjump", "clienthax", "doubletapjump", false, "Movement", None,
+        "Double-tap jump to bounce", "Press jump again in mid-air to use your Ninja Bounce (air only). Off by default.")),
     option("jumpshoot", "clienthax", "jumpshoot", true, "Movement", None,
         "Shoot in mid-air", "Lets bow, crossbow, claw and gun attacks fire while you are jumping."),
     option("jumpmagic", "clienthax", "jumpmagic", true, "Movement", None,
@@ -279,6 +301,41 @@ pub fn get_value(ini: &Ini, section: &str, key: &str) -> Option<Vec<u8>> {
     value
 }
 
+/// What GetPrivateProfileStringA returns for a key: the first `key=value` line of the first matching
+/// section (a ':' is not a separator), the rest of the line trimmed, one pair of surrounding quotes
+/// removed, no inline comments. None when absent.
+pub fn get_profile_value(ini: &Ini, section: &str, key: &str) -> Option<Vec<u8>> {
+    profile_line(ini, section, key).map(|index| profile_value_of(&ini.lines[index]))
+}
+
+fn profile_line(ini: &Ini, section: &str, key: &str) -> Option<usize> {
+    let wanted = key_of(section, key);
+    ini.lines.iter().position(|line| line.kind == Kind::Key && line.key == wanted && profile_separator(line).is_some())
+}
+
+/// Index of the '=' that GetPrivateProfileString splits a key line at (the first '=' when no ':' comes before it).
+fn profile_separator(line: &Line) -> Option<usize> {
+    let at = line.text.iter().position(|c| *c == b'=' || *c == b':')?;
+    (line.text[at] == b'=').then_some(at)
+}
+
+fn profile_value_of(line: &Line) -> Vec<u8> {
+    let at = profile_separator(line).unwrap_or(line.text.len().saturating_sub(1));
+    let value = rstrip(lskip(&line.text[(at + 1).min(line.text.len())..]));
+    match value {
+        [q, inner @ .., e] if (*q == b'"' || *q == b'\'') && q == e => inner.to_vec(),
+        _ => value.to_vec(),
+    }
+}
+
+/// The value the client's reader for `option` sees.
+fn client_value(ini: &Ini, option: &GameOption) -> Option<Vec<u8>> {
+    match option.reader {
+        Reader::Inih => get_value(ini, option.section, option.key),
+        Reader::Profile => get_profile_value(ini, option.section, option.key),
+    }
+}
+
 /// inih GetBoolean without a default: Some(true), Some(false), or None when absent or unreadable.
 pub fn parse_boolean(value: Option<&[u8]>) -> Option<bool> {
     let lowered = lower(value?);
@@ -304,7 +361,7 @@ pub fn read_ini_options(ini: &Ini) -> GameOptions {
     let legacy = parse_boolean(get_value(ini, LEGACY_MOVEATTACK.0, LEGACY_MOVEATTACK.1).as_deref());
     let mut values = BTreeMap::new();
     for option in &GAME_OPTIONS {
-        let own = parse_boolean(get_value(ini, option.section, option.key).as_deref());
+        let own = parse_boolean(client_value(ini, option).as_deref());
         let value = own.unwrap_or(if option.legacy == Some(Legacy::Follow) { legacy.unwrap_or(option.fallback) } else { option.fallback });
         values.insert(option.id.to_string(), value);
     }
@@ -316,7 +373,9 @@ pub fn read_game_options(text: &[u8]) -> GameOptions {
 }
 
 /// Keep the original key spelling, spacing and inline comment; replace only the value.
-fn rewrite_value(line: &Line, value: &[u8]) -> Vec<u8> {
+/// With `drop_comment` (GetPrivateProfileString keys) any inline comment goes, since that reader
+/// would take it as part of the value.
+fn rewrite_value(line: &Line, value: &[u8], drop_comment: bool) -> Vec<u8> {
     // /^(\s*[^=:]*?\s*[=:][ \t]*)(.*)$/s: everything up to the first '=' or ':' and the blanks after it.
     let Some(separator) = line.text.iter().position(|c| *c == b'=' || *c == b':') else {
         let mut out = line.name.clone();
@@ -329,6 +388,17 @@ fn rewrite_value(line: &Line, value: &[u8]) -> Vec<u8> {
         split += 1;
     }
     let (head, rest) = line.text.split_at(split);
+    if drop_comment {
+        if line.text[separator] != b'=' {
+            let mut out = line.name.clone();
+            out.push(b'=');
+            out.extend_from_slice(value);
+            return out;
+        }
+        let mut out = head.to_vec();
+        out.extend_from_slice(value);
+        return out;
+    }
     let comment = find_chars_or_comment(rest, b"");
     let before = &rest[..comment];
     let trailing = before.len() - rstrip(before).len();
@@ -338,13 +408,22 @@ fn rewrite_value(line: &Line, value: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Set one key: the first line keeps its place, repeats and continuations go, a new key joins the end of its section.
-fn set_value(ini: &mut Ini, section: &str, key: &str, value: &str) {
+/// Set one option: the first line keeps its place, repeats and continuations go, a new key joins
+/// the end of its section. A single line the client already reads as `on` is left byte-for-byte.
+fn set_value(ini: &mut Ini, option: &GameOption, on: bool) {
+    let (section, key) = (option.section, option.key);
     let wanted = key_of(section, key);
-    let value = value.as_bytes();
+    let value: &[u8] = if on { b"true" } else { b"false" };
     let matches: Vec<usize> = ini.lines.iter().enumerate().filter(|(_, line)| matches_key(line, &wanted)).map(|(i, _)| i).collect();
-    if let Some((&first, rest)) = matches.split_first() {
-        let text = rewrite_value(&ini.lines[first], value);
+    if matches.len() == 1 && ini.lines[matches[0]].kind == Kind::Key && parse_boolean(client_value(ini, option).as_deref()) == Some(on) {
+        return;
+    }
+    let profile_first = if option.reader == Reader::Profile { profile_line(ini, section, key) } else { None };
+    if let Some(&first) = matches.first() {
+        // The first match is always a key line; for GetPrivateProfileString the line it reads is kept.
+        let first = profile_first.unwrap_or(first);
+        let rest: Vec<usize> = matches.iter().copied().filter(|&i| i != first).collect();
+        let text = rewrite_value(&ini.lines[first], value, option.reader == Reader::Profile);
         ini.lines[first].text = text;
         ini.lines[first].value = value.to_vec();
         for &index in rest.iter().rev() {
@@ -415,9 +494,22 @@ pub fn apply_game_options<S: AsRef<str>>(text: &[u8], changes: &[(S, bool)]) -> 
     }
     for (id, value) in &ordered {
         let option = option_by_id(id).ok_or_else(|| Error::new(format!("Unknown game option: {id}.")))?;
-        set_value(&mut ini, option.section, option.key, if *value { "true" } else { "false" });
+        set_value(&mut ini, option, *value);
     }
     Ok(serialize_ini(&ini))
+}
+
+/// Write every option explicitly: the value the client reads now (else its default), with `changes`
+/// on top. After this the file no longer depends on any client default, so what the launcher shows
+/// is what the game does whatever the client version. Lines the client already reads correctly are
+/// left byte-for-byte; `moveattack`, [config], [debug] and unknown keys are never touched.
+pub fn explicit_game_options(text: &[u8], changes: &BTreeMap<String, bool>) -> Result<Vec<u8>> {
+    if let Some(unknown) = changes.keys().find(|id| option_by_id(id).is_none()) {
+        return Err(Error::new(format!("Unknown game option: {unknown}.")));
+    }
+    let mut values = read_game_options(text).values;
+    values.extend(changes.iter().map(|(id, on)| (id.clone(), *on)));
+    apply_game_options_map(text, &values)
 }
 
 /// Apply a change map in GAME_OPTIONS order (maps carry no insertion order).
@@ -584,11 +676,120 @@ mod tests {
 
     #[test]
     fn double_tap_jump() {
-        assert!(values("")["doubletapjump"]);
-        let after = apply(&real(), &[("doubletapjump", false)]);
-        assert!(!values(&after)["doubletapjump"]);
+        assert!(!values("")["doubletapjump"]);
+        let after = apply(&real(), &[("doubletapjump", true)]);
+        assert!(values(&after)["doubletapjump"]);
         assert!(!after.contains("attackwalk") && !after.contains("attackjump") && !after.contains("chargemove"), "an unrelated change does not add the movement keys");
-        assert!(values(&apply(&after, &[("doubletapjump", true)]))["doubletapjump"]);
+        assert!(!values(&apply(&after, &[("doubletapjump", false)]))["doubletapjump"]);
+        let option = option_by_id("doubletapjump").unwrap();
+        assert!(!option.description.contains("Flash Jump") && !option.label.contains("Flash Jump"));
+        assert_eq!(option.description, "Press jump again in mid-air to use your Ninja Bounce (air only). Off by default.");
+    }
+
+    /// Every fallback is the client's own default for that key (client line `client-1.5.0-fixes3`):
+    /// - discord, winkey, nobulb, customcolor, jumpshoot, jumpmagic: mapleroot/ijl15/YourStuff.h
+    ///   doini(), `reader.GetBoolean(section, key, "true")` (a non-null char* default, so true);
+    /// - attackwalk / attackjump / chargemove: src/attackstop_patch.h ResolveMoveAttackSettings,
+    ///   `attackWalk.value_or(false)`, `attackJump/chargeMove.value_or(legacy)` with legacy
+    ///   `moveAttack.value_or(true)`;
+    /// - doubletapjump: src/bounce.cpp `ReadIniBool("clienthax", "doubletapjump", false)` (false
+    ///   since client 1.5.0), read with GetPrivateProfileStringA;
+    /// - config.example.ini ships the same values (attackwalk=false, attackjump=true,
+    ///   chargemove=true, doubletapjump=false, nobulb=true, customcolor=true, enableactivitystatus=true).
+    /// Change this table only together with the client.
+    #[test]
+    fn fallbacks_match_the_client() {
+        let client: [(&str, &str, &str, bool, Reader); 10] = [
+            ("discord", "discord", "enableactivitystatus", true, Reader::Inih), // YourStuff.h
+            ("winkey", "clienthax", "enablewinkey", true, Reader::Inih),        // YourStuff.h
+            ("nobulb", "clienthax", "nobulb", true, Reader::Inih),              // YourStuff.h
+            ("customcolor", "clienthax", "customcolor", true, Reader::Inih),    // YourStuff.h
+            ("attackwalk", "clienthax", "attackwalk", false, Reader::Inih),     // attackstop_patch.h
+            ("attackjump", "clienthax", "attackjump", true, Reader::Inih),      // attackstop_patch.h (moveattack default true)
+            ("chargemove", "clienthax", "chargemove", true, Reader::Inih),      // attackstop_patch.h (moveattack default true)
+            ("doubletapjump", "clienthax", "doubletapjump", false, Reader::Profile), // bounce.cpp
+            ("jumpshoot", "clienthax", "jumpshoot", true, Reader::Inih),        // YourStuff.h
+            ("jumpmagic", "clienthax", "jumpmagic", true, Reader::Inih),        // YourStuff.h
+        ];
+        assert_eq!(GAME_OPTIONS.len(), client.len());
+        for (id, section, key, fallback, reader) in client {
+            let option = option_by_id(id).unwrap_or_else(|| panic!("{id} missing"));
+            assert_eq!((option.section, option.key, option.fallback, option.reader), (section, key, fallback, reader), "{id}");
+            assert_eq!(values("")[id], fallback, "{id} with an empty config.ini");
+        }
+    }
+
+    /// The page's copy (ui/game-options.mjs) must carry the same fallbacks and readers.
+    #[test]
+    fn the_page_table_matches() {
+        let page = include_str!("../../ui/game-options.mjs");
+        for option in &GAME_OPTIONS {
+            let at = page.find(&format!("id: '{}',", option.id)).unwrap_or_else(|| panic!("{} not in the page table", option.id));
+            let entry = &page[at..at + page[at..].find("},").unwrap()];
+            assert!(entry.contains(&format!("fallback: {},", option.fallback)), "{}: {entry}", option.id);
+            assert_eq!(entry.contains("reader: 'profile'"), option.reader == Reader::Profile, "{}", option.id);
+            assert!(entry.contains(option.description.replace('\'', "\\'").as_str()), "{} description", option.id);
+        }
+    }
+
+    #[test]
+    fn double_tap_jump_is_read_like_get_private_profile_string() {
+        // An inline comment is part of the value for this reader: unreadable, so the client default.
+        assert!(!values("[clienthax]\r\ndoubletapjump=true ; on please\r\n")["doubletapjump"]);
+        // The first line wins; a later repeat does not make it unreadable.
+        assert!(values("[clienthax]\ndoubletapjump=true\ndoubletapjump=false\n")["doubletapjump"]);
+        assert!(values("[clienthax]\ndoubletapjump = \"on\"\n")["doubletapjump"]);
+        assert!(!values("[clienthax]\ndoubletapjump: true\n")["doubletapjump"]);
+        // Writing drops the inline comment so the client can read the value.
+        let on = apply("[clienthax]\r\ndoubletapjump=false ; off for now\r\nnobulb=true ; keep\r\n", &[("doubletapjump", true), ("nobulb", false)]);
+        assert_eq!(on, "[clienthax]\r\ndoubletapjump=true\r\nnobulb=false ; keep\r\n");
+        assert!(values(&on)["doubletapjump"]);
+        assert_eq!(apply("[clienthax]\ndoubletapjump: false ; x\n", &[("doubletapjump", true)]), "[clienthax]\ndoubletapjump=true\n");
+        // The line the client reads is the one kept.
+        assert_eq!(apply("[clienthax]\ndoubletapjump: x\ndoubletapjump=off\n", &[("doubletapjump", true)]), "[clienthax]\ndoubletapjump=true\n");
+    }
+
+    #[test]
+    fn every_option_is_written_explicitly_with_what_the_panel_shows() {
+        let explicit = |text: &str, changes: &[(&str, bool)]| {
+            let map: BTreeMap<String, bool> = changes.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+            latin1_decode(&explicit_game_options(&b(text), &map).unwrap())
+        };
+        let real = real();
+        let shown = values(&real);
+        let after = explicit(&real, &[]);
+        // The client reads exactly what the panel showed, and every owned key is now in the file.
+        assert_eq!(values(&after), shown);
+        for option in &GAME_OPTIONS {
+            assert!(get_value(&parse_ini(&b(&after)), option.section, option.key).is_some(), "{} written", option.id);
+        }
+        assert!(!after.contains("doubletapjump=true"));
+        // Everything that was there stays byte-for-byte, in order; only new lines were added.
+        let mut old = split_lines(&real).into_iter().peekable();
+        for line in split_lines(&after) {
+            if old.peek() == Some(&line) {
+                old.next();
+            }
+        }
+        assert_eq!(old.next(), None, "every original line survives in order");
+        assert!(after.contains("[config]\r\nhost=203.0.113.7\r\nport=8484\r\n[debug]") || after.contains("[config]\r\nhost=203.0.113.7\r\nport=8484\r\n\r\n[debug]"));
+        assert!(after.contains("[debug]\r\nattackdiag=1\r\n"));
+        assert_eq!(after.matches("moveattack").count(), 1);
+        assert!(after.as_bytes().iter().enumerate().all(|(i, c)| *c != b'\n' || (i > 0 && after.as_bytes()[i - 1] == b'\r')));
+        // Doing it again changes nothing, and spellings the client already reads right are kept.
+        assert_eq!(explicit(&after, &[]), after);
+        let yes = "[clienthax]\r\nNoBulb = yes ; mine\r\n";
+        assert!(explicit(yes, &[]).starts_with("[clienthax]\r\nNoBulb = yes ; mine\r\n"));
+        // An unreadable value becomes the default the panel showed; changes go on top.
+        let junk = explicit("[clienthax]\nnobulb=maybe\njumpshoot=false\n", &[("discord", false)]);
+        let v = values(&junk);
+        assert!(v["nobulb"] && !v["jumpshoot"] && !v["discord"] && !v["doubletapjump"]);
+        assert!(junk.contains("nobulb=true\n"));
+        // Legacy moveattack=false: the movement keys are written as the client reads them now.
+        let legacy = explicit("[clienthax]\nmoveattack=false\n", &[]);
+        assert_eq!(pick(&values(&legacy)), [false, false, false]);
+        assert!(legacy.contains("attackjump=false") && legacy.contains("chargemove=false"));
+        assert!(explicit_game_options(&b(&real), &BTreeMap::from([("host".to_string(), true)])).is_err());
     }
 
     #[test]
@@ -608,5 +809,7 @@ mod tests {
         assert_eq!(value["legacy"], "walk");
         assert_eq!(value["fallback"], false);
         assert!(serde_json::to_value(GAME_OPTIONS[0]).unwrap().get("legacy").is_none());
+        assert_eq!(serde_json::to_value(GAME_OPTIONS[0]).unwrap()["reader"], "inih");
+        assert_eq!(serde_json::to_value(option_by_id("doubletapjump").unwrap()).unwrap()["reader"], "profile");
     }
 }
