@@ -61,6 +61,8 @@ pub struct Release {
     pub player_owned: Vec<String>,
     pub news: Option<Vec<News>>,
     pub layers: Vec<LayerInfo>,
+    /// The manifest's optional `minClientBuild` (see manifest.rs).
+    pub min_client_build: Option<u32>,
     pub files: Vec<FileEntry>,
     pub layer_sources: Vec<LayerSource>,
     pub layer_parts: Vec<LayerPart>,
@@ -185,6 +187,7 @@ pub async fn load_release(feed_url: &str, install_dir: Option<&str>, access: &Fe
         player_owned: manifest.player_owned.unwrap_or_default(),
         news: manifest.news,
         layers,
+        min_client_build: manifest.min_client_build,
         files,
         layer_sources,
         layer_parts,
@@ -201,6 +204,8 @@ pub enum Available {
         layers: Vec<NameVersion>,
         #[serde(rename = "manifestSha256")]
         manifest_sha256: String,
+        #[serde(rename = "minClientBuild", skip_serializing_if = "Option::is_none")]
+        min_client_build: Option<u32>,
     },
     AccessKey { message: String },
     Offline { message: String },
@@ -257,6 +262,7 @@ pub async fn check_available_release(feed_url: &str, access: Option<&FeedAccess>
             version: manifest.version,
             layers: manifest.layers.iter().map(|l| NameVersion { name: l.name.clone(), version: l.version.clone() }).collect(),
             manifest_sha256: sha256_hex(&bytes),
+            min_client_build: manifest.min_client_build,
         })
     };
     match work.await {
@@ -432,8 +438,10 @@ mod tests {
 
     #[test]
     fn available_serializes_like_the_electron_status_objects() {
-        let ok = Available::Ok { version: "1.4.1".into(), layers: vec![NameVersion { name: "base".into(), version: "v83".into() }], manifest_sha256: "ab".into() };
+        let ok = Available::Ok { version: "1.4.1".into(), layers: vec![NameVersion { name: "base".into(), version: "v83".into() }], manifest_sha256: "ab".into(), min_client_build: None };
         assert_eq!(serde_json::to_value(&ok).unwrap(), json!({ "status": "ok", "version": "1.4.1", "layers": [{ "name": "base", "version": "v83" }], "manifestSha256": "ab" }));
+        let gated = Available::Ok { version: "1.6.0".into(), layers: vec![], manifest_sha256: "ab".into(), min_client_build: Some(10600) };
+        assert_eq!(serde_json::to_value(&gated).unwrap()["minClientBuild"], json!(10600));
         assert_eq!(serde_json::to_value(Available::AccessKey { message: "m".into() }).unwrap(), json!({ "status": "access-key", "message": "m" }));
     }
 }

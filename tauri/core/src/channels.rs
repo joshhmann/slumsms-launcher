@@ -254,7 +254,7 @@ mod tests {
     const LIVE: &str = "https://slumspatch.asslorde.com/manifest.json";
 
     fn ok(version: &str, sha: &str) -> Available {
-        Available::Ok { version: version.into(), layers: Vec::<NameVersion>::new(), manifest_sha256: sha.into() }
+        Available::Ok { version: version.into(), layers: Vec::<NameVersion>::new(), manifest_sha256: sha.into(), min_client_build: None }
     }
     fn denied() -> Available {
         Available::AccessKey { message: "x".into() }

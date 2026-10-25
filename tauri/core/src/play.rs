@@ -125,7 +125,7 @@ mod tests {
     use crate::release::NameVersion;
 
     fn ok(sha: &str) -> Available {
-        Available::Ok { version: "1.4.1".into(), layers: Vec::<NameVersion>::new(), manifest_sha256: sha.into() }
+        Available::Ok { version: "1.4.1".into(), layers: Vec::<NameVersion>::new(), manifest_sha256: sha.into(), min_client_build: None }
     }
     fn record(sha: &str) -> InstalledRecord {
         InstalledRecord { release: "1.4.0".into(), manifest_sha256: sha.into(), layers: vec![], verified_at: String::new(), launch: None }

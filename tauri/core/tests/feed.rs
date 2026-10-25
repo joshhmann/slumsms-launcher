@@ -593,3 +593,27 @@ async fn a_dev_only_key_still_opens_test_and_rc_when_live_refuses_it() {
     let (probes, user) = probe_channels(&live, "wrong", ACCESS_KEY_USER).await;
     assert_eq!((probes[&Channel::Live].status(), probes[&Channel::Rc].status(), user.as_str()), ("access-key", "access-key", ACCESS_KEY_USER), "a wrong key keeps the player user");
 }
+
+#[tokio::test]
+async fn min_client_build_and_unknown_top_level_fields_pass_through() {
+    let server = Server::start().await;
+    let mut files = publish("", "1.6.0", "SlumsMS.exe", &[base_layer(), client_layer("1.6.0", b"exe")], &[], None).files;
+    let mut top: serde_json::Value = serde_json::from_slice(&files["manifest.json"]).unwrap();
+    top["minClientBuild"] = json!(10600);
+    top["aFieldFromTheFuture"] = json!({ "anything": [1, "two"] });
+    files.insert("manifest.json".into(), serde_json::to_vec(&top).unwrap());
+    server.put_all(files);
+    let a = access(&server, "");
+    match check_available_release(&server.url("manifest.json"), Some(&a), AVAILABLE_TIMEOUT).await {
+        Available::Ok { version, min_client_build, .. } => {
+            assert_eq!(version, "1.6.0");
+            assert_eq!(min_client_build, Some(10600));
+        }
+        other => panic!("{other:?}"),
+    }
+    let dir = temp_dir("min-client-build");
+    let release = load(&server, &dir, "").await.unwrap();
+    assert_eq!(release.min_client_build, Some(10600));
+    install(&dir, &release, fast()).await.unwrap();
+    assert_eq!(read_installed_record(dir.to_str().unwrap()).unwrap().release, "1.6.0");
+}

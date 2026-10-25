@@ -181,6 +181,9 @@ pub struct Manifest {
     pub files: Vec<ManifestFile>,
     /// schemaVersion 2 only.
     pub layers: Vec<LayerRef>,
+    /// Optional `minClientBuild`: the oldest slums.dll build the game server accepts
+    /// (major*10000+minor*100+patch). Launchers before it ignore the field.
+    pub min_client_build: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,6 +344,12 @@ fn validate_layers(value: &Value) -> Result<Vec<LayerRef>> {
     Ok(out)
 }
 
+/// Optional `minClientBuild`. Only a display hint (the game server enforces it at login), so a
+/// missing or malformed value means "no check" and never makes the release unusable.
+fn min_client_build(value: Option<&Value>) -> Option<u32> {
+    value.and_then(safe_integer).filter(|n| (1..=99_999_999).contains(n)).map(|n| n as u32)
+}
+
 /// Validate a top-level manifest. schemaVersion 1 lists files directly; 2 references layer manifests.
 pub fn validate_manifest(value: &Value) -> Result<Manifest> {
     let schema = value.get("schemaVersion").and_then(safe_integer);
@@ -351,7 +360,8 @@ pub fn validate_manifest(value: &Value) -> Result<Manifest> {
     let launch = validate_launch(value.get("launch").unwrap_or(&Value::Null))?;
     let news = validate_news(value.get("news"))?;
     let player_owned = validate_player_owned(value.get("playerOwned"))?;
-    let mut manifest = Manifest { schema_version: schema.unwrap() as u8, version: version.to_string(), launch, news, player_owned, files: vec![], layers: vec![] };
+    let min_client_build = min_client_build(value.get("minClientBuild"));
+    let mut manifest = Manifest { schema_version: schema.unwrap() as u8, version: version.to_string(), launch, news, player_owned, files: vec![], layers: vec![], min_client_build };
     if manifest.schema_version == 1 {
         let files = validate_files(value.get("files").unwrap_or(&Value::Null))?;
         check_tree(files.iter().map(|f| (f.path.as_str(), f.size)))?;
@@ -488,6 +498,23 @@ mod tests {
         with_news["news"] = json!([{ "title": "ok" }]);
         with_news["playerOwned"] = json!(["config.ini", "CONFIG.INI"]);
         assert!(validate_manifest(&with_news).is_err());
+    }
+
+    #[test]
+    fn min_client_build_is_optional_and_unknown_fields_are_ignored() {
+        let layers = json!([{ "name": "client", "version": "1.6.0", "manifestUrl": "x", "sha256": SHA }]);
+        assert_eq!(validate_manifest(&v2(layers.clone())).unwrap().min_client_build, None);
+        let mut m = v2(layers);
+        m["minClientBuild"] = json!(10600);
+        m["someFutureField"] = json!({ "nested": [1, 2, 3] });
+        let parsed = validate_manifest(&m).unwrap();
+        assert_eq!(parsed.min_client_build, Some(10600));
+        assert_eq!(parsed.version, "1.0");
+        // Malformed values are a missing hint, not a broken release.
+        for bad in [json!("10600"), json!(-1), json!(0), json!(1.5), json!(null), json!([10600])] {
+            m["minClientBuild"] = bad.clone();
+            assert_eq!(validate_manifest(&m).unwrap().min_client_build, None, "{bad}");
+        }
     }
 
     #[test]

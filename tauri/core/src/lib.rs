@@ -2,6 +2,7 @@
 //! with `cargo test -p slums-core` on any platform (the Tauri app crate only wires it to the UI).
 
 pub mod channels;
+pub mod client_build;
 pub mod config;
 pub mod error;
 pub mod fsutil;
