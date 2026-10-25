@@ -77,9 +77,14 @@ button:disabled { cursor: not-allowed; }
 .eyebrow { margin: 0 0 4px; color: var(--gold); font-size: 10px; font-weight: 700; letter-spacing: 2px; }
 h1 { margin: 0; color: #fff; font-size: clamp(20px, 2.6vw, 23px); line-height: 1.2; font-weight: 700; text-shadow: 0 1px 0 var(--navy-ink); }
 .status-message { margin: 4px 0 0; max-width: 660px; color: #c8d2e6; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
-.release-detail { grid-area: detail; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 28px; margin: 14px -21px 1px; padding: 7px 21px; border-top: 1px solid #ffffff14; border-radius: 0 0 3px 3px; background: var(--navy-deep); }
+.release-detail { grid-area: detail; display: flex; flex-direction: column; gap: 5px; margin: 14px -21px 1px; padding: 7px 21px; border-top: 1px solid #ffffff14; border-radius: 0 0 3px 3px; background: var(--navy-deep); }
 .detail-label { font-size: 10px; font-weight: 700; letter-spacing: 1.7px; color: var(--gold); }
 .release-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* Two lines: the game (server and installed, with the badge), then the client, launcher and channel, smaller and dimmer. */
+.release-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 28px; min-width: 0; }
+.release-sub { gap: 2px 18px; }
+.release-sub .detail-label { font-size: 10px; font-weight: 600; letter-spacing: .4px; color: #9aa6bf; }
+.release-sub .release-value { font-size: 11px; font-weight: 600; color: #c8d2e6; }
 .release-value { color: #fff; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .release-detail[data-kind="couldnt-check"] #available-version, .release-detail[data-kind="checking"] #available-version,
 .release-detail[data-kind="unknown"] #installed-version, .release-detail[data-kind="not-installed"] #installed-version { color: var(--muted); font-weight: 400; }
@@ -167,7 +172,8 @@ footer { display: flex; align-items: baseline; gap: 8px; margin-top: 12px; paddi
   .launcher { padding: 0 20px 20px; }
   .client-card { grid-template-columns: minmax(0, 1fr); grid-template-areas: "copy" "action" "play" "detail"; padding-inline: 20px; }
   .button-play { margin-top: 12px; }
-  .release-detail { margin-inline: -19px; padding-inline: 19px; gap: 4px 18px; }
+  .release-detail { margin-inline: -19px; padding-inline: 19px; }
+  .release-main { gap: 4px 18px; }
   .news-item { padding-inline: 20px; }
 }
 
