@@ -1,6 +1,51 @@
 # SlumsMS Launcher
 
-Separate SlumsMS-branded launcher and static release publisher for the existing MapleRoot Windows client. This is a launcher-only rename: the server, game files, project directory, package identity and settings location remain unchanged. Existing BunsMS work is preserved. No game/server/DLL/Kaentake source or live services are changed by this project. Browser-game support is deferred.
+The official game launcher for SlumsMS (MapleStory v83 private server).
+
+SlumsMS Launcher 2.0 is built on **Tauri v2 (Rust + system WebView2)**, replacing the legacy Electron launcher. It ships as a single ~5 MB standalone Windows executable (`SlumsMS Launcher.exe`) that installs, updates, verifies, and launches the game client with fast startup (~0.35 s) and minimal memory overhead.
+
+The legacy Electron launcher source is preserved on branch `launcher-handover` until Electron is fully retired.
+
+## Develop and Build
+
+### Native Tests (Linux / Any OS)
+```sh
+# Run Rust core tests (slums-core)
+cd tauri && cargo test -p slums-core
+
+# Run Node publisher & UI unit tests
+npm test
+```
+
+### Windows Build (Silvia, `Z:\MSv83\SlumsMS-dev`)
+The Windows executable is built on Silvia in a workspace under `Z:\MSv83\SlumsMS-dev\`:
+```sh
+cd tauri/app && cargo tauri build
+# Output: tauri/target/release/SlumsMS Launcher.exe
+```
+
+### Signing (Workstation 187 only)
+Signing occurs **only on dev box 187**:
+```sh
+cargo tauri signer sign -f /root/.config/slumsms-launcher/tauri-signing.key -p "" --app-version <v> <exe>
+```
+> [!IMPORTANT]
+> The private signing key (`/root/.config/slumsms-launcher/tauri-signing.key`) **never leaves 187**. It is never printed, copied, or committed.
+
+### Friends Launcher Build
+For friends builds with the access key embedded:
+- The owner runs `Z:\MSv83\SlumsMS-dev\bake-tauri-key.ps1` on Silvia (the access key is piped from 164 and never seen by agents).
+- Verify with `Z:\MSv83\SlumsMS-dev\verify-tauri-key.ps1 -Exe <exe>`.
+- Friends builds self-update to newer signed versions while automatically preserving their built-in access key.
+
+## Channels & Publishing
+
+- **Channels:**
+  - **Live:** `/srv/slums-patch/` (requires player access key)
+  - **Test:** `/srv/slums-patch/launcher-test/` (requires dev access key)
+  - **RC:** `/srv/slums-patch/launcher-rc/` (requires dev access key)
+- **Publishing runbook:**
+  Detailed publishing steps are documented in `docs/release/RUNBOOK.md` step 2.6 in the SlumsMS server repository.
 
 ## What works
 
