@@ -1,9 +1,9 @@
-import { versionStatus, versionFooter, formatTimeLeft, actionHelp } from './version-status.mjs';
+import { versionStatus, versionFooter, launcherLabel, formatTimeLeft, actionHelp } from './version-status.mjs';
 import { GAME_OPTIONS } from './game-options.mjs';
 
 const elements = Object.fromEntries([
   'phase-badge', 'phase-label', 'status-eyebrow', 'status-heading', 'status-message',
-  'install-target', 'install-target-path', 'change-folder-inline', 'release-detail', 'installed-version', 'available-version', 'release-note',
+  'install-target', 'install-target-path', 'change-folder-inline', 'release-detail', 'installed-version', 'available-version', 'client-version', 'launcher-version', 'release-note',
   'news', 'news-list', 'progress-area', 'progress-label', 'progress-detail', 'operation-progress',
   'action-help', 'play', 'play-label', 'error-message', 'open-settings', 'settings-dialog',
   'close-settings', 'install-dir', 'folder-source', 'choose-folder', 'open-folder', 'repair-files',
@@ -341,7 +341,13 @@ function renderVersions() {
   elements['installed-version'].title = status.installedTitle;
   elements['available-version'].textContent = status.availableLabel;
   elements['available-version'].title = status.availableTitle;
+  elements['client-version'].textContent = status.clientLabel;
+  elements['client-version'].title = status.clientTitle;
+  elements['client-version'].dataset.known = String(status.clientKnown);
+  elements['client-version'].dataset.outdated = String(Boolean(status.clientNote));
+  elements['launcher-version'].textContent = launcherLabel(configuration.appVersion);
   elements['release-note'].textContent = note;
+  elements['release-note'].title = status.clientNote ? `${status.clientNote}.` : '';
   elements['release-note'].hidden = !note;
 }
 
@@ -431,6 +437,7 @@ function render() {
   elements['action-help'].textContent = actionHelp({
     bridgeAvailable, initialized, phase, busy, feedUrl: configuration.feedUrl, actionKind: action.kind,
     canPlay: state.canPlay, offlinePlay: state.offlinePlay, resuming: resuming(), fresh, accessKeyNeeded: state.accessKeyNeeded,
+    clientNote: versionStatus(state.installed, state.available).clientNote,
   });
   renderProgress();
 }

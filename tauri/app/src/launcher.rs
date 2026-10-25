@@ -6,6 +6,7 @@ use crate::platform;
 use crate::VERSION;
 use serde_json::{json, Map, Value};
 use slums_core::channels::{accessible_channels, change_folder, channel_feed, channel_install_dir, effective_channel, folder_owner, probe_channels, show_channel_picker, update_manifest_url, Channel, Probes, CHANNELS};
+use slums_core::client_build::read_client_build;
 use slums_core::config::{builtin_access_key, detect_bundled_client, clean_access_key, effective_access_key, read_launcher_config, standalone_install_dir, valid_access_key, validate_feed_url, LauncherConfig};
 use slums_core::error::{ACCESS_KEY_REQUIRED, CONFIG_MISSING, GAME_RUNNING};
 use slums_core::game_config::{game_running, read_game_config, write_game_config};
@@ -486,7 +487,7 @@ impl Launcher {
 
     async fn refresh_installed(&self) {
         let dir = self.effective().install_dir;
-        let installed = if dir.is_empty() {
+        let mut installed = if dir.is_empty() {
             json!({ "status": "not-installed" })
         } else if let Some(record) = read_installed_record(&dir) {
             json!({ "status": "installed", "version": record.release, "layers": record.layers.iter().map(|l| json!({ "name": l.name, "version": l.version })).collect::<Vec<_>>() })
@@ -495,6 +496,11 @@ impl Launcher {
         } else {
             json!({ "status": "not-installed" })
         };
+        // slums-build.txt beside slums.dll (1.6.0+ clients). Display only: missing means the UI falls
+        // back to the client layer version, and it never blocks Play.
+        if let Some(build) = read_client_build(&dir) {
+            installed["clientBuild"] = json!(build);
+        }
         self.send(json!({ "installed": installed }));
     }
 
@@ -1073,12 +1079,12 @@ impl Launcher {
 }
 
 fn available_from(release: &Release) -> Value {
-    json!({ "status": "ok", "version": release.version, "layers": release.layers.iter().map(|l| json!({ "name": l.name, "version": l.version })).collect::<Vec<_>>() })
+    json!({ "status": "ok", "version": release.version, "layers": release.layers.iter().map(|l| json!({ "name": l.name, "version": l.version })).collect::<Vec<_>>(), "minClientBuild": release.min_client_build })
 }
 
 fn available_json(available: &Available) -> Value {
     match available {
-        Available::Ok { version, layers, .. } => json!({ "status": "ok", "version": version, "layers": layers }),
+        Available::Ok { version, layers, min_client_build, .. } => json!({ "status": "ok", "version": version, "layers": layers, "minClientBuild": min_client_build }),
         other => json!({ "status": other.status() }),
     }
 }

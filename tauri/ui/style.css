@@ -83,6 +83,8 @@ h1 { margin: 0; color: #fff; font-size: clamp(20px, 2.6vw, 23px); line-height: 1
 .release-value { color: #fff; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .release-detail[data-kind="couldnt-check"] #available-version, .release-detail[data-kind="checking"] #available-version,
 .release-detail[data-kind="unknown"] #installed-version, .release-detail[data-kind="not-installed"] #installed-version { color: var(--muted); font-weight: 400; }
+#client-version[data-known="false"], .launcher-value { color: var(--muted); font-weight: 400; }
+#client-version[data-outdated="true"] { color: var(--orange-light); }
 .release-note { margin-left: auto; padding: 1px 6px; border: 1px solid var(--frame); border-radius: 2px; font-size: 10px; font-weight: 700; letter-spacing: .5px; color: var(--muted); }
 .release-detail[data-kind="up-to-date"] .release-note { border-color: var(--green-dark); color: var(--green); }
 .release-detail[data-kind="update-available"] { border-top-color: var(--orange); box-shadow: inset 0 1px 8px #e8891c33; }

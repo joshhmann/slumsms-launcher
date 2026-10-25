@@ -3,9 +3,12 @@
  * A local fake patch server for developing and testing the launcher (never a real feed).
  *
  *   node tauri/devtools/fake-feed.mjs build OUT_DIR [--files N] [--version 1.0.0] [--exe-from PROGRAM.exe]
+ *                                      [--client-build 1.6.0] [--min-client-build 10600]
  *       Builds Live, Test and RC channels with the real publisher (tools/publish.mjs): a "base" layer
  *       of N synthetic Data files with first-install packs, and a small "client" layer with
  *       SlumsMS.exe, slums.dll and config.ini. Test/RC get their own client layer and manifest.
+ *       --client-build adds slums-build.txt (release=..., build=...) beside slums.dll, as 1.6.0+
+ *       clients ship it; --min-client-build adds the optional top-level minClientBuild field.
  *   node tauri/devtools/fake-feed.mjs serve OUT_DIR [--port 8787]
  *       Serves it like nginx on the patch host: HTTP Basic auth, user "slums" with key "player-local"
  *       opens Live only; user "slumsdev" with key "dev-local" opens Live, /launcher-test/ and
@@ -50,13 +53,19 @@ function syntheticBase(count) {
 // --exe-from PATH ships a real program as SlumsMS.exe so Play can be exercised (e.g. rundll32.exe,
 // which exits at once without a window when started without arguments).
 let exeFrom = null;
+let clientBuild = null;
+const buildText = (release) => {
+  const [major, minor, patch] = release.split('.').map(Number);
+  return Buffer.from(`release=${release}\nbuild=${major * 10000 + minor * 100 + patch}\n`);
+};
 const clientFiles = (label) => ({
+  ...(clientBuild ? { 'slums-build.txt': buildText(clientBuild) } : {}),
   'SlumsMS.exe': exeFrom ?? Buffer.from(`fake SlumsMS starter (${label})`),
   'slums.dll': Buffer.from(`fake slums.dll (${label})`),
   'config.ini': Buffer.from('[config]\r\nhost=127.0.0.1\r\nport=8484\r\n\r\n[clienthax]\r\nmoveattack=true ; legacy switch\r\nnobulb=true\r\n\r\n[discord]\r\nenableactivitystatus=true\r\n'),
 });
 
-async function build(out, { count, version }) {
+async function build(out, { count, version, minClientBuild }) {
   await fs.mkdir(out, { recursive: true });
   const stage = await fs.mkdtemp(path.join(out, '.stage-'));
   try {
@@ -71,6 +80,11 @@ async function build(out, { count, version }) {
       await publishLayer({ source: path.join(stage, `client-${label}`), output, layer: 'client', version: release });
       await publishLayeredRelease({ output, version: release, layers: [['base', 'v83-local'], ['client', release]].map(([name, v]) => ({ name, version: v })),
         news: [{ title: `Local ${label} feed`, date: '2026-10-21', body: 'A fake feed served from this computer for launcher testing.' }] });
+      if (minClientBuild) {
+        const file = path.join(output, 'manifest.json');
+        const manifest = JSON.parse(await fs.readFile(file, 'utf8'));
+        await fs.writeFile(file, `${JSON.stringify({ ...manifest, minClientBuild }, null, 2)}\n`);
+      }
       console.log(`built ${label}: ${path.join(output, 'manifest.json')} (${release})`);
     }
   } finally { await fs.rm(stage, { recursive: true, force: true }); }
@@ -112,6 +126,9 @@ function serve(root, port) {
 
 const [command, dir, ...rest] = process.argv.slice(2);
 if (option(rest, '--exe-from')) exeFrom = await fs.readFile(option(rest, '--exe-from'));
-if (command === 'build' && dir) await build(path.resolve(dir), { count: Number(option(rest, '--files', '300')), version: option(rest, '--version', '1.0.0') });
-else if (command === 'serve' && dir) serve(path.resolve(dir), Number(option(rest, '--port', '8787')));
+if (option(rest, '--client-build')) clientBuild = option(rest, '--client-build');
+if (command === 'build' && dir) {
+  await build(path.resolve(dir), { count: Number(option(rest, '--files', '300')), version: option(rest, '--version', '1.0.0'),
+    minClientBuild: option(rest, '--min-client-build') ? Number(option(rest, '--min-client-build')) : undefined });
+} else if (command === 'serve' && dir) serve(path.resolve(dir), Number(option(rest, '--port', '8787')));
 else { console.error('usage: fake-feed.mjs build OUT_DIR [--files N] [--version V] | serve OUT_DIR [--port P]'); process.exit(2); }

@@ -1,15 +1,63 @@
 /**
- * Installed vs available game version, as shown in the STATUS panel and the Settings footer.
- * Pure: no DOM, so it is unit-tested directly.
+ * The versions the STATUS panel and the Settings footer show. Pure: no DOM, so it is unit-tested directly.
  *
- * installed: { status: 'installed', version, layers } | { status: 'unknown' } | { status: 'not-installed' }
+ *   Server    - the release the game server is on: the feed's (manifest's) top-level `version`.
+ *   Installed - the release this game folder was last verified as (installed.json).
+ *   Client    - the slums.dll build in the folder (slums-build.txt, 1.6.0+), else the installed
+ *               record's `client` layer version.
+ *   Launcher  - this app's own version.
+ *
+ * installed: { status: 'installed', version, layers, clientBuild? } | { status: 'unknown', clientBuild? } | { status: 'not-installed' }
  *   'unknown' is an existing client the launcher has not verified since it started recording versions.
- * available: { status: 'ok', version, layers } | { status: 'checking' } | { status: 'access-key' | 'offline' | 'error' }
+ *   clientBuild is { release: '1.6.0', build: 10600 } from slums-build.txt beside slums.dll.
+ * available: { status: 'ok', version, layers, minClientBuild? } | { status: 'checking' } | { status: 'access-key' | 'offline' | 'error' }
+ *   minClientBuild (optional) is the oldest client build the game server lets in.
  */
 
 const layerText = (layers) => (Array.isArray(layers) ? layers : [])
   .filter((layer) => layer && typeof layer.name === 'string' && typeof layer.version === 'string')
   .map((layer) => `${layer.name} ${layer.version}`).join(' · ');
+
+const isBuild = (n) => Number.isSafeInteger(n) && n > 0;
+
+/** "1.6.0" -> 10600 (major*10000+minor*100+patch); NaN for anything else ("2026.10.19-1", "v83"). */
+export function buildNumber(release) {
+  const match = /^(\d{1,4})\.(\d{1,2})\.(\d{1,2})$/u.exec(typeof release === 'string' ? release.trim() : '');
+  return match ? Number(match[1]) * 10000 + Number(match[2]) * 100 + Number(match[3]) : NaN;
+}
+
+/**
+ * The installed client: { label, title, build, source }.
+ *   source 'file'  - slums-build.txt: label "1.6.0 (build 10600)".
+ *   source 'layer' - no file (clients before 1.6.0): the installed record's client layer version;
+ *                    build is known only when that version is MAJOR.MINOR.PATCH.
+ *   source 'none'  - label "Unknown", build NaN.
+ * Never throws: a missing or odd value is just "Unknown".
+ */
+export function clientVersion(installed) {
+  const file = installed && installed.status !== 'not-installed' ? installed.clientBuild : undefined;
+  if (file && typeof file.release === 'string' && file.release && isBuild(file.build)) {
+    return { label: `${file.release} (build ${file.build})`, title: 'From slums-build.txt in the game folder.', build: file.build, source: 'file' };
+  }
+  const layer = installed?.status === 'installed' && Array.isArray(installed.layers)
+    ? installed.layers.find((entry) => entry && entry.name === 'client' && typeof entry.version === 'string' && entry.version)
+    : undefined;
+  if (layer) return { label: layer.version, title: 'Client layer of the installed release (this client has no build file).', build: buildNumber(layer.version), source: 'layer' };
+  return { label: 'Unknown', title: '', build: NaN, source: 'none' };
+}
+
+/**
+ * "Client update needed: the server needs build 10600 or newer" when the server's manifest names a
+ * minClientBuild and the installed client is known to be older; '' otherwise (no field, unknown
+ * client, not installed, or the check failed). Play installs the new release, so this is a note,
+ * not a new flow.
+ */
+export function clientUpdateNote(installed, available) {
+  const min = available?.status === 'ok' ? available.minClientBuild : undefined;
+  if (!isBuild(min) || !installed || installed.status === 'not-installed') return '';
+  const { build } = clientVersion(installed);
+  return isBuild(build) && build < min ? `Client update needed: the server needs build ${min} or newer` : '';
+}
 
 export function versionStatus(installed, available) {
   const have = installed?.status === 'installed' && typeof installed.version === 'string' && installed.version ? installed.version : '';
@@ -17,10 +65,13 @@ export function versionStatus(installed, available) {
   const checking = !available || available.status === 'checking';
   const installedLabel = have || (installed?.status === 'not-installed' ? 'Not installed' : 'Unknown');
   const availableLabel = offer || (checking ? 'Checking…' : 'Couldn’t check');
+  const client = clientVersion(installed);
+  const clientNote = clientUpdateNote(installed, available);
 
   let kind;
   if (!offer) kind = checking ? 'checking' : 'couldnt-check';
   else if (installed?.status === 'not-installed') kind = 'not-installed';
+  else if (clientNote) kind = 'update-available'; // the server refuses this client: Play updates first
   else if (!have) kind = 'unknown';
   else kind = have === offer ? 'up-to-date' : 'update-available';
 
@@ -32,9 +83,15 @@ export function versionStatus(installed, available) {
     kind,
     installedLabel,
     availableLabel,
+    /** The server's release: the same value as availableLabel, under its clearer name. */
+    serverLabel: availableLabel,
     installedTitle: have ? layerText(installed.layers) : '',
     availableTitle,
-    note: {
+    clientLabel: client.label,
+    clientTitle: clientNote ? `${clientNote}.` : client.title,
+    clientKnown: client.source !== 'none',
+    clientNote,
+    note: clientNote ? 'Client update needed' : {
       'up-to-date': 'Up to date',
       'update-available': 'Update available',
       'not-installed': 'Not installed',
@@ -45,11 +102,16 @@ export function versionStatus(installed, available) {
   };
 }
 
-/** Settings footer: "Launcher X · Game installed Y / available Z". */
+/** Settings footer: "Launcher X · Server Y · Installed Z · Client 1.6.0 (build 10600)". */
 export function versionFooter(appVersion, installed, available) {
   const status = versionStatus(installed, available);
-  return [appVersion && `Launcher ${appVersion}`, `Game installed ${status.installedLabel} / available ${status.availableLabel}`]
+  return [appVersion && `Launcher ${appVersion}`, `Server ${status.serverLabel}`, `Installed ${status.installedLabel}`, `Client ${status.clientLabel}`]
     .filter(Boolean).join(' · ');
+}
+
+/** The launcher row in the STATUS panel. */
+export function launcherLabel(appVersion) {
+  return typeof appVersion === 'string' && appVersion ? appVersion : 'Unknown';
 }
 
 /** Download time left, rounded the way people read it ("about 1 h 5 min left"). */
@@ -92,12 +154,14 @@ export function playPlan({ offered, record }) {
  * a ready, verified client ("All release files verified. Ready to play.") needs no second
  * "All game files verified." line, so the renderer hides the line instead.
  */
-export function actionHelp({ bridgeAvailable, initialized, phase, busy, feedUrl, actionKind, canPlay, offlinePlay, resuming, fresh, accessKeyNeeded }) {
+export function actionHelp({ bridgeAvailable, initialized, phase, busy, feedUrl, actionKind, canPlay, offlinePlay, resuming, fresh, accessKeyNeeded, clientNote }) {
   if (!bridgeAvailable) return 'Open SlumsMS in the desktop launcher to manage your client.';
   if (!initialized) return 'Starting…';
   if (phase === 'self-updating') return 'The launcher restarts by itself when the update is ready.';
   if (busy) return 'Keep the launcher open while this finishes.';
   if (!feedUrl) return 'Set the update server in Settings to get started.';
+  if (clientNote && phase === 'ready' && canPlay) return `${clientNote}. Update installs it, then starts the game.`;
+  if (clientNote && phase === 'needs-update') return `${clientNote}. Update downloads only the files that changed.`;
   if (phase === 'ready' && canPlay && actionKind === 'update') return 'A new release is out. Update downloads only the files that changed, then starts the game.';
   if (phase === 'ready' && offlinePlay) return 'Couldn’t check for updates. If the game says it is out of date, try again once you are online.';
   if (phase === 'ready' && canPlay) return '';

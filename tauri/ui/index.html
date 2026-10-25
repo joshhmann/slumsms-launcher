@@ -52,8 +52,10 @@
           </div>
           <button class="button button-play" id="play" type="button" disabled><span id="play-label">Play</span><span class="play-arrow" aria-hidden="true">▶</span></button>
           <div class="release-detail" id="release-detail" data-kind="checking">
-            <div class="release-row"><span class="detail-label">INSTALLED</span><span class="release-value" id="installed-version">Unknown</span></div>
-            <div class="release-row"><span class="detail-label">AVAILABLE</span><span class="release-value" id="available-version">Checking…</span></div>
+            <div class="release-row" title="The release the game server is on"><span class="detail-label">SERVER</span><span class="release-value" id="available-version">Checking…</span></div>
+            <div class="release-row" title="The release your game folder was last verified as"><span class="detail-label">INSTALLED</span><span class="release-value" id="installed-version">Unknown</span></div>
+            <div class="release-row" title="Your game client (slums.dll) build"><span class="detail-label">CLIENT</span><span class="release-value" id="client-version">Unknown</span></div>
+            <div class="release-row" title="This launcher's version"><span class="detail-label">LAUNCHER</span><span class="release-value launcher-value" id="launcher-version">…</span></div>
             <div class="release-row"><span class="detail-label">CHANNEL</span><span class="release-value channel-value"><span id="channel-name">Live</span><select class="channel-select" id="channel-select" aria-label="Channel" hidden></select></span></div>
             <span class="release-note" id="release-note" hidden></span>
           </div>
