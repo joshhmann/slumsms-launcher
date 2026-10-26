@@ -18,3 +18,13 @@ test('the help line still explains every other state', () => {
   assert.match(actionHelp({ ...base, feedUrl: '' }), /Set the update server/);
   assert.equal(actionHelp({ ...base, initialized: false }), 'Starting…');
 });
+
+test('the launcher picks one of the two mascots, either one', async () => {
+  const { pickMascot, MASCOTS } = await import('../tauri/ui/mascot.mjs');
+  assert.deepEqual(MASCOTS, ['girl', 'bucket']);
+  assert.equal(pickMascot(() => 0), 'girl');
+  assert.equal(pickMascot(() => 0.49), 'girl');
+  assert.equal(pickMascot(() => 0.5), 'bucket');
+  assert.equal(pickMascot(() => 0.9999), 'bucket');
+  assert.equal(pickMascot(() => 1), 'bucket');   // a random() that returns 1 still gives a valid mascot
+});
