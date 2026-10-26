@@ -1,8 +1,8 @@
 // Which picture fronts the banner: the girl (with the bucket blob peeking over STATUS), the bucket blob on its own, or
-// one of the two "Bustin' chat since 2009!" illustrations (chat, chat-smug). Like the site, the launcher starts on a
+// one of the three "Bustin' chat since 2009!" illustrations (chat, chat-smug, chat-slime). Like the site, the launcher starts on a
 // random one and cross-fades to the next every 7 s, paused while the window is hidden or minimized; with reduced
 // motion it keeps one picture per launch. style.css does the fade and shows the girl when nothing is set (no JS).
-export const MASCOTS = ['girl', 'bucket', 'chat', 'chat-smug'];
+export const MASCOTS = ['girl', 'bucket', 'chat', 'chat-smug', 'chat-slime'];
 export const ROTATE_MS = 7000;
 
 export function pickMascot(random = Math.random) {
