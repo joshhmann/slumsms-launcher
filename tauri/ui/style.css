@@ -43,10 +43,23 @@ button:disabled { cursor: not-allowed; }
 .scene::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(#0c122266, transparent 35%, transparent 55%, #141c30 100%); }
 .scene-art { position: absolute; inset: 0; pointer-events: none; }
 .scene-video { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center 45%; }
+/* Mascots (art: client repo assets/brand), taking turns per launch (mascot.mjs sets body[data-mascot]). Girl's turn,
+   the default: she leans in from the banner's right, cut off by the windows below, and the bucket blob peeks over the
+   STATUS window's top edge. Bucket's turn: the blob alone, bigger, its crate resting on STATUS. They ignore the mouse. */
+.scene-mascot { position: absolute; z-index: 1; right: max(28px, calc(50% - 520px)); bottom: 0; height: min(calc(100% - 66px), 380px); pointer-events: none; user-select: none; filter: drop-shadow(0 6px 14px #000a); }
+.card-mascot { position: absolute; z-index: 2; top: -66px; left: 112px; width: 92px; pointer-events: none; user-select: none; filter: drop-shadow(0 3px 6px #0009); }
+.mascot-bucket { display: none; bottom: 20px; height: min(calc(100% - 80px), 260px); }
+body[data-mascot="bucket"] .mascot-bucket { display: block; }
+body[data-mascot="bucket"] .mascot-girl, body[data-mascot="bucket"] .card-mascot { display: none; }
+/* Chat's turn: the "Bustin' chat since 2009!" illustration fills the banner's right side over Henesys, fading in from
+   the left so the masthead stays on the plain banner; no standing mascots. */
+.scene-poster { display: none; position: absolute; top: 0; right: 0; height: 100%; max-width: 100%; object-fit: cover; object-position: right top; pointer-events: none; user-select: none; -webkit-mask-image: linear-gradient(to right, transparent, #000 22%); mask-image: linear-gradient(to right, transparent, #000 22%); }
+body[data-mascot="chat"] .scene-poster { display: block; }
+body[data-mascot="chat"] .scene-mascot, body[data-mascot="chat"] .card-mascot { display: none; }
 
 .masthead { position: relative; z-index: 1; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; max-width: 1100px; height: 100%; margin: 0 auto; padding: 28px 40px; }
 .brand { display: flex; align-items: center; gap: 12px; }
-.brand-leaf { width: 40px; height: 40px; flex-shrink: 0; background: linear-gradient(160deg, #f6a03a, #c8461a); clip-path: polygon(50% 0, 60% 22%, 78% 12%, 74% 36%, 98% 34%, 82% 52%, 92% 62%, 64% 64%, 56% 86%, 52% 100%, 48% 100%, 44% 86%, 36% 64%, 8% 62%, 18% 52%, 2% 34%, 26% 36%, 22% 12%, 40% 22%); filter: drop-shadow(0 2px 2px #0008); }
+.brand-leaf { width: 48px; height: 48px; flex-shrink: 0; filter: drop-shadow(0 2px 3px #000a); }   /* the taped-leaf emblem (client repo assets/brand) */
 .brand-name { margin: 0; color: #fff; font-size: 32px; font-weight: 700; line-height: 1; letter-spacing: .3px; text-shadow: 0 1px 0 #3a2a10, 0 0 1px #3a2a10, 0 2px 8px #0009; }
 .brand-caption { margin: 6px 0 0; color: var(--gold-light); font-size: 10px; font-weight: 700; letter-spacing: 3.5px; text-shadow: 0 1px 3px #000c; }
 
@@ -167,6 +180,8 @@ footer { display: flex; align-items: baseline; gap: 8px; margin-top: 12px; paddi
 
 @media (max-width: 650px) {
   .scene { flex-basis: 180px; }
+  .scene-mascot { right: 12px; opacity: .55; }
+  .card-mascot { left: auto; right: 16px; width: 72px; top: -52px; }
   .masthead { padding: 22px 20px; }
   .brand-name { font-size: 27px; }
   .launcher { padding: 0 20px 20px; }

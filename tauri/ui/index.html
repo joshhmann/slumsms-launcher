@@ -9,15 +9,19 @@
     <link rel="stylesheet" href="./style.css">
     <script src="./bridge.js"></script>
     <script type="module" src="./renderer.mjs"></script>
+    <script type="module" src="./mascot.mjs"></script>
   </head>
   <body>
     <header class="scene">
       <div class="scene-art" aria-hidden="true">
         <video class="scene-video" src="./assets/henesys.webm" poster="./assets/henesys.png" autoplay muted loop playsinline disablepictureinpicture></video>
       </div>
+      <img class="scene-poster" src="./assets/scene-chat.webp" alt="" aria-hidden="true" draggable="false">
+      <img class="scene-mascot mascot-girl" src="./assets/mascot-girl.webp" alt="" aria-hidden="true" draggable="false">
+      <img class="scene-mascot mascot-bucket" src="./assets/mascot-bucket.webp" alt="" aria-hidden="true" draggable="false">
       <div class="masthead">
         <div class="brand">
-          <span class="brand-leaf" aria-hidden="true"></span>
+          <img class="brand-leaf" src="./assets/emblem.webp" alt="" aria-hidden="true" draggable="false">
           <div><p class="brand-name">SlumsMS</p><p class="brand-caption">GAME LAUNCHER</p></div>
         </div>
         <div class="masthead-actions">
@@ -37,6 +41,7 @@
 
         <section class="client-card window" aria-labelledby="status-heading">
           <p class="window-tab" aria-hidden="true">STATUS</p>
+          <img class="card-mascot" src="./assets/mascot-bucket.webp" alt="" aria-hidden="true" draggable="false">
           <div class="client-copy">
             <p class="eyebrow" id="status-eyebrow">YOUR NEXT ADVENTURE</p>
             <h1 id="status-heading">Make yourself at home.</h1>
