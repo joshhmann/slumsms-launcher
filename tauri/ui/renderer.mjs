@@ -366,8 +366,11 @@ function render() {
   const fresh = phase === 'needs-update' && state.fresh;
   const action = primaryAction();
 
-  elements['phase-badge'].dataset.phase = phase;
-  elements['phase-label'].textContent = !initialized && bridgeAvailable ? 'Starting' : fresh ? 'Not installed' : phaseNames[phase];
+  // a ready folder whose client the server refuses (minClientBuild) reads as an update, like the status and the button
+  const clientOutdated = phase === 'ready' && Boolean(versionStatus(state.installed, state.available).clientNote);
+  elements['phase-badge'].dataset.phase = clientOutdated ? 'needs-update' : phase;
+  elements['phase-label'].textContent = !initialized && bridgeAvailable ? 'Starting' : fresh ? 'Not installed'
+    : clientOutdated ? 'Client update needed' : phaseNames[phase];
   elements['status-eyebrow'].textContent = fresh ? 'FIRST TIME SETUP'
     : phase === 'needs-update' ? 'UPDATE AVAILABLE'
       : phase === 'error' ? 'SOMETHING WENT WRONG' : 'YOUR NEXT ADVENTURE';
