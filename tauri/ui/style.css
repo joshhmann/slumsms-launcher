@@ -43,19 +43,15 @@ button:disabled { cursor: not-allowed; }
 .scene::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(#0c122266, transparent 35%, transparent 55%, #141c30 100%); }
 .scene-art { position: absolute; inset: 0; pointer-events: none; }
 .scene-video { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center 45%; }
-/* Banner pictures (art: client repo assets/brand), rotated by mascot.mjs through body[data-mascot] with a soft cross-fade;
-   the girl's turn is the default (no JS). Girl: she leans in from the banner's right, cut off by the windows below, and
-   the bucket blob peeks over the STATUS window's top edge. Bucket: the blob alone, bigger, its crate resting on STATUS.
-   Chat, chat-smug and chat-slime: a "Bustin' chat since 2009!" illustration fills the banner's right side over Henesys, fading in
-   from the left so the masthead stays on the plain banner. All of them ignore the mouse; --on is a shown picture's opacity. */
-.scene-mascot { position: absolute; z-index: 1; right: max(28px, calc(50% - 520px)); bottom: 0; height: min(calc(100% - 66px), 380px); pointer-events: none; user-select: none; filter: drop-shadow(0 6px 14px #000a); }
-.card-mascot { position: absolute; z-index: 2; top: -66px; left: 112px; width: 92px; pointer-events: none; user-select: none; filter: drop-shadow(0 3px 6px #0009); }
-.mascot-bucket { bottom: 20px; height: min(calc(100% - 80px), 260px); }
-.scene-poster { position: absolute; top: 0; right: 0; height: 100%; max-width: 100%; object-fit: cover; object-position: right top; pointer-events: none; user-select: none; -webkit-mask-image: linear-gradient(to right, transparent, #000 22%); mask-image: linear-gradient(to right, transparent, #000 22%); }
-.scene-mascot, .card-mascot, .scene-poster { --on: 1; opacity: 0; transition: opacity 1.2s ease; }
-body:not([data-mascot]) :is(.mascot-girl, .card-mascot), body[data-mascot="girl"] :is(.mascot-girl, .card-mascot),
-body[data-mascot="bucket"] .mascot-bucket, body[data-mascot="chat"] .poster-chat, body[data-mascot="chat-smug"] .poster-chat-smug,
-body[data-mascot="chat-slime"] .poster-chat-slime { opacity: var(--on); }
+/* Slums-chan (the site's cut-outs, SlumsMS site-160-theme docs/site/assets/brand), rotated by mascot.mjs through
+   body[data-mascot] with a soft cross-fade; the heart is first and the default (no JS), as on the site. She stands at the
+   banner's right over the Henesys night, on a warm glow so her dark hair and jacket read against the sky, and the STATUS
+   window below cuts her off like the site's patch card. --on is a shown picture's opacity. She ignores the mouse. */
+.scene-rotor { position: absolute; z-index: 1; right: max(48px, calc(50% - 494px)); bottom: 0; height: min(calc(100% - 70px), 400px); aspect-ratio: 1; pointer-events: none; user-select: none; --on: 1; }
+.scene-rotor::before { content: ""; position: absolute; inset: 12% 2% -6%; border-radius: 50%; background: radial-gradient(closest-side, #ff8a3d4d, #ff8a3d1f 55%, transparent); }
+.scene-rotor > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; object-position: center bottom; opacity: 0; filter: drop-shadow(4px 4px 0 #0009) drop-shadow(0 6px 16px #0008); transition: opacity .9s ease; }
+body:not([data-mascot]) .pic-heart, body[data-mascot="heart"] .pic-heart, body[data-mascot="peace"] .pic-peace,
+body[data-mascot="crossed"] .pic-crossed, body[data-mascot="point"] .pic-point, body[data-mascot="cozy"] .pic-cozy { opacity: var(--on); }
 
 .masthead { position: relative; z-index: 1; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; max-width: 1100px; height: 100%; margin: 0 auto; padding: 28px 40px; }
 .brand { display: flex; align-items: center; gap: 12px; }
@@ -180,8 +176,7 @@ footer { display: flex; align-items: baseline; gap: 8px; margin-top: 12px; paddi
 
 @media (max-width: 650px) {
   .scene { flex-basis: 180px; }
-  .scene-mascot { right: 12px; --on: .55; }
-  .card-mascot { left: auto; right: 16px; width: 72px; top: -52px; }
+  .scene-rotor { right: 20px; --on: .55; }
   .masthead { padding: 22px 20px; }
   .brand-name { font-size: 27px; }
   .launcher { padding: 0 20px 20px; }
