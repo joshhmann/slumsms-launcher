@@ -51,11 +51,11 @@ button:disabled { cursor: not-allowed; }
 .mascot-bucket { display: none; bottom: 20px; height: min(calc(100% - 80px), 260px); }
 body[data-mascot="bucket"] .mascot-bucket { display: block; }
 body[data-mascot="bucket"] .mascot-girl, body[data-mascot="bucket"] .card-mascot { display: none; }
-/* Chat's turn: the "Bustin' chat since 2009!" illustration fills the banner's right side over Henesys, fading in from
+/* Chat's turns (chat, and chat-smug lying back): a "Bustin' chat since 2009!" illustration fills the banner's right side over Henesys, fading in from
    the left so the masthead stays on the plain banner; no standing mascots. */
 .scene-poster { display: none; position: absolute; top: 0; right: 0; height: 100%; max-width: 100%; object-fit: cover; object-position: right top; pointer-events: none; user-select: none; -webkit-mask-image: linear-gradient(to right, transparent, #000 22%); mask-image: linear-gradient(to right, transparent, #000 22%); }
-body[data-mascot="chat"] .scene-poster { display: block; }
-body[data-mascot="chat"] .scene-mascot, body[data-mascot="chat"] .card-mascot { display: none; }
+body[data-mascot="chat"] .poster-chat, body[data-mascot="chat-smug"] .poster-chat-smug { display: block; }
+body[data-mascot^="chat"] .scene-mascot, body[data-mascot^="chat"] .card-mascot { display: none; }
 
 .masthead { position: relative; z-index: 1; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; max-width: 1100px; height: 100%; margin: 0 auto; padding: 28px 40px; }
 .brand { display: flex; align-items: center; gap: 12px; }
