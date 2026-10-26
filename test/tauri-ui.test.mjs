@@ -19,12 +19,13 @@ test('the help line still explains every other state', () => {
   assert.equal(actionHelp({ ...base, initialized: false }), 'Starting…');
 });
 
-test('the launcher picks one of the two mascots, either one', async () => {
+test('the launcher picks one of the three mascot turns, any of them', async () => {
   const { pickMascot, MASCOTS } = await import('../tauri/ui/mascot.mjs');
-  assert.deepEqual(MASCOTS, ['girl', 'bucket']);
+  assert.deepEqual(MASCOTS, ['girl', 'bucket', 'chat']);
   assert.equal(pickMascot(() => 0), 'girl');
-  assert.equal(pickMascot(() => 0.49), 'girl');
-  assert.equal(pickMascot(() => 0.5), 'bucket');
-  assert.equal(pickMascot(() => 0.9999), 'bucket');
-  assert.equal(pickMascot(() => 1), 'bucket');   // a random() that returns 1 still gives a valid mascot
+  assert.equal(pickMascot(() => 0.33), 'girl');
+  assert.equal(pickMascot(() => 0.34), 'bucket');
+  assert.equal(pickMascot(() => 0.66), 'bucket');
+  assert.equal(pickMascot(() => 0.67), 'chat');
+  assert.equal(pickMascot(() => 1), 'chat');   // a random() that returns 1 still gives a valid mascot
 });
