@@ -19,15 +19,15 @@ test('the help line still explains every other state', () => {
   assert.equal(actionHelp({ ...base, initialized: false }), 'Starting…');
 });
 
-test('reduced motion can land on any of the five cut-outs', async () => {
+test('reduced motion can land on any of the eight pictures', async () => {
   const { pickMascot, MASCOTS } = await import('../tauri/ui/mascot.mjs');
-  assert.deepEqual(MASCOTS, ['heart', 'peace', 'crossed', 'point', 'cozy']);   // the site's home order, heart first
+  // the site's home order, heart first
+  assert.deepEqual(MASCOTS, ['heart', 'peace-wink', 'peace', 'chin-hands', 'crossed', 'point-wink', 'point', 'cozy']);
   assert.equal(pickMascot(() => 0), 'heart');
-  assert.equal(pickMascot(() => 0.19), 'heart');
-  assert.equal(pickMascot(() => 0.2), 'peace');
-  assert.equal(pickMascot(() => 0.4), 'crossed');
-  assert.equal(pickMascot(() => 0.6), 'point');
-  assert.equal(pickMascot(() => 0.8), 'cozy');
+  assert.equal(pickMascot(() => 0.124), 'heart');
+  assert.equal(pickMascot(() => 0.125), 'peace-wink');
+  assert.equal(pickMascot(() => 0.5), 'crossed');
+  assert.equal(pickMascot(() => 0.875), 'cozy');
   assert.equal(pickMascot(() => 1), 'cozy');   // a random() that returns 1 still gives a valid picture
 });
 
@@ -52,7 +52,7 @@ function fakePage({ reducedMotion = false } = {}) {
   return { doc, win, timers, fire, setHidden, listeners };
 }
 
-test('the banner starts on the heart and cross-fades through the cut-outs in order every 7 s, wrapping around', async () => {
+test('the banner starts on the heart and cross-fades through the pictures in order every 7 s, wrapping around', async () => {
   const { startRotation, nextMascot, ROTATE_MS } = await import('../tauri/ui/mascot.mjs');
   assert.equal(ROTATE_MS, 7000);
   assert.equal(nextMascot('cozy'), 'heart');
@@ -62,8 +62,8 @@ test('the banner starts on the heart and cross-fades through the cut-outs in ord
   assert.equal(page.doc.body.dataset.mascot, 'heart');
   assert.deepEqual([...page.timers.values()].map((timer) => timer.ms), [7000]);
   const seen = [];
-  for (let i = 0; i < 5; i += 1) { page.fire(); seen.push(page.doc.body.dataset.mascot); }
-  assert.deepEqual(seen, ['peace', 'crossed', 'point', 'cozy', 'heart']);
+  for (let i = 0; i < 8; i += 1) { page.fire(); seen.push(page.doc.body.dataset.mascot); }
+  assert.deepEqual(seen, ['peace-wink', 'peace', 'chin-hands', 'crossed', 'point-wink', 'point', 'cozy', 'heart']);
   stop();
   assert.equal(page.timers.size, 0);
   assert.equal(page.listeners.size, 0);
@@ -83,14 +83,14 @@ test('the rotation pauses while the window is hidden or minimized and resumes wh
   page.setHidden(false);  // nor does a second visible one: still one timer
   assert.equal(page.timers.size, 1);
   page.fire();
-  assert.equal(page.doc.body.dataset.mascot, 'peace');
+  assert.equal(page.doc.body.dataset.mascot, 'peace-wink');
 });
 
 test('with reduced motion the banner keeps one picture per launch', async () => {
   const { startRotation } = await import('../tauri/ui/mascot.mjs');
   const page = fakePage({ reducedMotion: true });
-  startRotation({ doc: page.doc, win: page.win, random: () => 0.5 });
-  assert.equal(page.doc.body.dataset.mascot, 'crossed');
+  startRotation({ doc: page.doc, win: page.win, random: () => 0.4 });
+  assert.equal(page.doc.body.dataset.mascot, 'chin-hands');
   assert.equal(page.timers.size, 0);
   assert.equal(page.listeners.size, 0);
 });

@@ -1,8 +1,8 @@
-// Which Slums-chan cut-out fronts the banner. Like the site's home page (theme.js), the launcher starts on the heart
+// Which Slums-chan picture (a cut-out, or one with a speech bubble) fronts the banner. Like the site's home page (theme.js), the launcher starts on the heart
 // (the owner's favourite) and cross-fades to the next every 7 s in the site's order, paused while the window is hidden
 // or minimized; with reduced motion it picks one at random and keeps it for the launch. style.css does the fade and
 // shows the heart when nothing is set (no JS).
-export const MASCOTS = ['heart', 'peace', 'crossed', 'point', 'cozy'];
+export const MASCOTS = ['heart', 'peace-wink', 'peace', 'chin-hands', 'crossed', 'point-wink', 'point', 'cozy'];
 export const ROTATE_MS = 7000;
 
 export function pickMascot(random = Math.random) {
