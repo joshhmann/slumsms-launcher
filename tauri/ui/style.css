@@ -50,7 +50,7 @@ button:disabled { cursor: not-allowed; }
 
 .masthead { position: relative; z-index: 1; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; max-width: 1100px; height: 100%; margin: 0 auto; padding: 28px 40px; }
 .brand { display: flex; align-items: center; gap: 12px; }
-.brand-leaf { width: 40px; height: 40px; flex-shrink: 0; background: linear-gradient(160deg, #f6a03a, #c8461a); clip-path: polygon(50% 0, 60% 22%, 78% 12%, 74% 36%, 98% 34%, 82% 52%, 92% 62%, 64% 64%, 56% 86%, 52% 100%, 48% 100%, 44% 86%, 36% 64%, 8% 62%, 18% 52%, 2% 34%, 26% 36%, 22% 12%, 40% 22%); filter: drop-shadow(0 2px 2px #0008); }
+.brand-leaf { width: 48px; height: 48px; flex-shrink: 0; filter: drop-shadow(0 2px 3px #000a); }   /* the taped-leaf emblem (client repo assets/brand) */
 .brand-name { margin: 0; color: #fff; font-size: 32px; font-weight: 700; line-height: 1; letter-spacing: .3px; text-shadow: 0 1px 0 #3a2a10, 0 0 1px #3a2a10, 0 2px 8px #0009; }
 .brand-caption { margin: 6px 0 0; color: var(--gold-light); font-size: 10px; font-weight: 700; letter-spacing: 3.5px; text-shadow: 0 1px 3px #000c; }
 
