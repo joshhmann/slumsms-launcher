@@ -10,6 +10,7 @@
     <script src="./bridge.js"></script>
     <script type="module" src="./renderer.mjs"></script>
     <script type="module" src="./mascot.mjs"></script>
+    <script type="module" src="./account.mjs"></script>
   </head>
   <body>
     <header class="scene">
@@ -72,6 +73,7 @@
               <div class="release-row" title="Your game client (slums.dll) build"><span class="detail-label">client</span><span class="release-value" id="client-version">Unknown</span></div>
               <div class="release-row" title="This launcher's version"><span class="detail-label">launcher</span><span class="release-value launcher-value" id="launcher-version">…</span></div>
               <div class="release-row"><span class="detail-label">channel</span><span class="release-value channel-value"><span id="channel-name">Live</span><select class="channel-select" id="channel-select" aria-label="Channel" hidden></select></span></div>
+              <div class="release-row account-row" id="account-row" hidden><span class="detail-label" id="account-label">website</span><span class="release-value" id="account-value">…</span><span class="account-note" id="account-note" hidden></span><button class="link-button account-alerts" id="account-alerts" type="button" title="Open the Slums Market in your browser" hidden></button><button class="link-button" id="account-action" type="button" hidden>Sign in</button></div>
             </div>
           </div>
         </section>
@@ -128,6 +130,30 @@
         </details>
         <p class="error-message" id="settings-error" role="alert" hidden></p>
         <p class="dialog-foot" id="version-info"></p>
+      </div>
+    </dialog>
+
+    <dialog class="settings-dialog account-dialog" id="account-dialog" aria-labelledby="account-heading">
+      <div class="dialog-head">
+        <h2 id="account-heading">SIGN IN</h2>
+        <button class="icon-button icon-button-small" id="close-account" type="button" title="Close"><span aria-hidden="true">✕</span><span class="sr-only">Close sign in</span></button>
+      </div>
+      <div class="dialog-body">
+        <div class="account-tabs" role="tablist" aria-label="How to sign in">
+          <button class="account-tab" id="account-tab-password" type="button" role="tab" aria-selected="true">Username</button>
+          <button class="account-tab" id="account-tab-signup" type="button" role="tab" aria-selected="false">New account</button>
+          <button class="account-tab" id="account-tab-code" type="button" role="tab" aria-selected="false">Code in game</button>
+        </div>
+        <form class="account-form" id="account-form" autocomplete="off">
+          <label class="account-field" id="account-code-field" hidden>Invite code<input id="account-invite" name="invite" autocapitalize="characters" spellcheck="false"></label>
+          <label class="account-field" id="account-user-field">Username<input id="account-user" name="user" autocapitalize="off" spellcheck="false" maxlength="32"></label>
+          <label class="account-field" id="account-pass-field">Password<input id="account-pass" name="pass" type="password" maxlength="64"></label>
+          <p class="field-help" id="account-code-help" hidden>Get a code, then type <b>@weblogin</b> and the code in game, in any chat. The code works once, for 10 minutes.</p>
+          <p class="account-waiting" id="account-waiting" hidden>In game, type <code>@weblogin <span id="account-code"></span></code> <span class="account-time" id="account-time"></span></p>
+          <p class="error-message" id="account-error" role="alert" hidden></p>
+          <div class="button-row"><button class="button button-secondary" id="account-submit" type="submit">Sign in</button></div>
+          <p class="field-help">Your game account on <span id="account-site">SlumsMS</span>. The launcher never keeps your password, only a sign-in you can end with Sign out.</p>
+        </form>
       </div>
     </dialog>
 

@@ -67,7 +67,9 @@ toolchain's own `bin` first on `PATH`. It also runs a copy of `cargo-tauri.exe` 
 The self-test window stays hidden. The run writes start-up times, the first check, each step's
 result and the settings to `report.json`, then exits. The report shows only whether a key is
 saved, never the key. `--data-dir` keeps the self-test away from the real settings, and
-`--legacy-dir=DIR` feeds it fake Electron settings.
+`--legacy-dir=DIR` feeds it fake Electron settings. Step `account-store` saves, reads back and
+deletes a made-up website session in `--data-dir` (it shows DPAPI works for this user); step `account` reports the
+sign-in state for the current site.
 
 WebView2 needs the interactive desktop. The SSH smoke test (`tauri-smoke.ps1`) therefore runs
 the exe through a one-off scheduled task in the logged-in session. It deletes the task
@@ -136,6 +138,16 @@ What is new:
     silent, the old process kills it, moves its own exe back and carries on.
   - Debug builds, `--self-test`, `--no-self-update` and `SLUMSMS_NO_SELF_UPDATE=1` skip
     self-update.
+- **Website sign-in (1.6.0, tickets 104 and 105):** the STATUS strip shows "signed in as <character>" or a
+  Sign in link. The SIGN IN dialog has three ways in, all through the site's login service
+  (`docs/site/LOGIN.md` in SlumsMS-site): game username and password, a new account with an invite code, or a
+  code typed in game (`@weblogin`, polled every 3 s while the code lasts). Live signs in to
+  `https://theslumsms.asslorde.com`; Test and RC sign in to the TEST site `http://192.168.0.164:8192` only (the one
+  plain-HTTP origin allowed, besides loopback). The launcher keeps only the site's session token, never a password:
+  the form clears the password field when it sends, and the core wipes its copy. It asks `/api/login/me` on start
+  and every 10 minutes, and deletes a session the site no longer accepts (expired, or the account in
+  `revoked.txt`). Sign out deletes it too. Price alerts come from `/api/market/me` (`badge`); the link opens the
+  market in the browser. `--site-url=http://127.0.0.1:PORT` points a development build at a local login service.
 - **WebView2 missing or broken:** a plain dialog explains it and offers Microsoft's download page.
   The window opens hidden and appears once it is set up, so it never flashes white.
 
@@ -162,7 +174,7 @@ What is new:
 
 | Where | What |
 | --- | --- |
-| `%APPDATA%\com.slumsms.launcher\` | `settings.json`, `launcher.log` |
+| `%APPDATA%\com.slumsms.launcher\` | `settings.json`, `launcher.log`, `site-session-live.bin` / `site-session-test.bin` (the website session, DPAPI-encrypted for this Windows user, with the site's origin sealed in) |
 | `%LOCALAPPDATA%\com.slumsms.launcher\EBWebView\` | WebView2 profile |
 | `%APPDATA%\mapleroot-launcher\settings.json` | read once (migration), never written |
 | game folder | managed files, `config.ini` (Game options only), `.slumsms-launcher/` (state, installed, layer cache), `.mapleroot-stage-*` while downloading |

@@ -243,3 +243,18 @@ footer { display: flex; align-items: baseline; gap: 8px; margin-top: 12px; paddi
 .channel-select:disabled { opacity: .6; }
 .release-detail[data-channel="test"] #channel-name, .release-detail[data-channel="rc"] #channel-name { color: var(--orange-light); font-weight: 700; }
 .question-text { white-space: pre-line; overflow-wrap: anywhere; color: #fff; }
+
+/* Website sign-in (tickets 104 and 105): one row at the end of the STATUS strip, and the SIGN IN dialog. */
+.account-row { margin-left: auto; }
+.account-row .link-button { font-size: 11px; }
+.account-note { font-size: 10px; color: var(--muted); }
+.account-alerts { color: var(--orange-light); font-weight: 700; }
+.account-dialog { width: min(420px, calc(100vw - 32px)); }
+.account-tabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid var(--gold-soft); }
+.account-tab { flex: 1; padding: 6px 4px; border: 1px solid transparent; border-bottom: 0; border-radius: 3px 3px 0 0; color: var(--muted); background: none; font-size: 12px; font-weight: 700; }
+.account-tab[aria-selected="true"] { color: var(--gold-light); border-color: var(--gold-soft); background: var(--panel-head); }
+.account-form { display: flex; flex-direction: column; gap: 10px; }
+.account-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 700; color: #c8d2e6; }
+.account-waiting { margin: 0; font-size: 13px; color: #c8d2e6; }
+.account-waiting code { padding: 2px 6px; border: 1px solid var(--gold-soft); border-radius: 3px; color: var(--gold-light); background: var(--navy-ink); font-size: 15px; letter-spacing: 1px; }
+.account-time { color: var(--muted); font-size: 11px; }

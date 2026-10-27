@@ -2,6 +2,8 @@
 //! commands and the "launcher:state" event, plus channels, settings migration and self-update.
 //! The access key never leaves this process: the page only learns whether one is saved.
 
+pub mod account;
+
 use crate::platform;
 use crate::VERSION;
 use serde_json::{json, Map, Value};
@@ -46,6 +48,8 @@ pub struct Args {
     pub install_dir: Option<String>,
     pub data_dir: Option<PathBuf>,
     pub legacy_dir: Option<PathBuf>,
+    /// A development website for the sign-in (loopback HTTP only, so it can never stand in for a real site).
+    pub site_url: Option<String>,
 }
 
 impl Args {
@@ -70,6 +74,7 @@ impl Args {
             install_dir: value("--install-dir="),
             data_dir: value("--data-dir=").map(PathBuf::from),
             legacy_dir: value("--legacy-dir=").map(PathBuf::from),
+            site_url: value("--site-url=").filter(|u| url::Url::parse(u).is_ok_and(|u| u.scheme() == "http" && matches!(u.host_str(), Some("127.0.0.1") | Some("localhost")))),
         }
     }
     /// What a relaunch after a self-update keeps.
@@ -83,6 +88,9 @@ impl Args {
         }
         if let Some(v) = &self.data_dir {
             out.push(format!("--data-dir={}", v.display()));
+        }
+        if let Some(v) = &self.site_url {
+            out.push(format!("--site-url={v}"));
         }
         out
     }
@@ -117,6 +125,9 @@ pub struct Launcher {
     bundled_dir: String,
     standalone_dir: String,
     settings_file: PathBuf,
+    /// The settings folder; the website session file lives here too.
+    data_dir: PathBuf,
+    account: Mutex<account::AccountRun>,
     legacy_file: Option<PathBuf>,
     log_file: PathBuf,
     exe: PathBuf,
@@ -210,6 +221,8 @@ impl Launcher {
             bundled_dir,
             standalone_dir,
             settings_file,
+            data_dir: data_dir.clone(),
+            account: Mutex::default(),
             legacy_file,
             log_file,
             exe,
@@ -369,6 +382,8 @@ impl Launcher {
         let _ = self.ready_tx.send(true);
         self.refresh_channels().await;
         let _ = self.probed_tx.send(true);
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move { me.refresh_account().await });
         self.refresh_versions(false).await;
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
@@ -378,6 +393,8 @@ impl Launcher {
                     me.refresh_channels().await;
                     me.refresh_available(false).await;
                 }
+                // Also notices a session the site has since revoked.
+                me.refresh_account().await;
             }
         });
     }
@@ -483,6 +500,9 @@ impl Launcher {
             self.persist(&settings);
         }
         self.send(json!({}));
+        if !self.account.lock().unwrap().base.is_empty() {
+            self.sync_account_site().await;
+        }
     }
 
     async fn refresh_installed(&self) {
@@ -990,6 +1010,11 @@ impl Launcher {
                 Ok(json!({ "running": shown["running"], "saved": saved["saved"], "attackwalk": saved["values"]["attackwalk"], "configAfter": after }))
             }
             .await,
+            "account" => {
+                self.refresh_account().await;
+                Ok(self.inner.lock().unwrap().state.get("account").cloned().unwrap_or(Value::Null))
+            }
+            "account-store" => self.account_store_self_test(),
             other => match other.strip_prefix("channel:").and_then(Channel::parse) {
                 None => Err(format!("unknown self-test step {other}")),
                 Some(channel) => {
@@ -1072,6 +1097,7 @@ impl Launcher {
             "pendingFiles": state.get("pendingFiles"),
             "showChannelPicker": state.get("showChannelPicker"),
             "channelLabel": state.get("channelLabel"),
+            "account": state.get("account"),
         });
         let _ = std::fs::write(report, serde_json::to_vec_pretty(&value).unwrap_or_default());
         self.app.exit(0);
@@ -1335,6 +1361,8 @@ async fn set_channel_inner(l: &Arc<Launcher>, channel: Channel) -> Cmd<Value> {
     l.refresh_installed().await;
     let me = l.clone();
     tauri::async_runtime::spawn(async move { me.refresh_available(true).await });
+    let me = l.clone();
+    tauri::async_runtime::spawn(async move { me.sync_account_site().await });
     Ok(l.settings_json())
 }
 

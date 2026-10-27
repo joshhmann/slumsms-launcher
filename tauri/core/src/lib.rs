@@ -17,5 +17,6 @@ pub mod play;
 pub mod release;
 pub mod selfupdate;
 pub mod settings;
+pub mod site;
 
 pub use error::{Error, Result};
