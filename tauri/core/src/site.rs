@@ -421,6 +421,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("slums-site-{}", uuid::Uuid::new_v4()));
         token_store::save(&dir, TEST_SITE, "body.mac", "Momo").unwrap();
         assert_eq!(token_store::load(&dir, TEST_SITE), Some(("body.mac".into(), "Momo".into())));
+        let on_disk = std::fs::read(token_store::path(&dir, TEST_SITE)).unwrap();
+        let plain = on_disk.windows(8).any(|w| w == b"body.mac");
+        assert_eq!(plain, cfg!(not(windows)), "on Windows the file holds only DPAPI ciphertext");
         assert_eq!(token_store::load(&dir, LIVE_SITE), None);
         // A test token copied over the live file is refused: the origin sealed with it is the TEST one.
         std::fs::copy(token_store::path(&dir, TEST_SITE), token_store::path(&dir, LIVE_SITE)).unwrap();
