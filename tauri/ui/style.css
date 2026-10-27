@@ -46,7 +46,8 @@ button:disabled { cursor: not-allowed; }
 /* Slums-chan (the site's cut-outs and speech-bubble pictures, SlumsMS site-160-theme docs/site/assets/brand), rotated by mascot.mjs through
    body[data-mascot] with a soft cross-fade; the heart is first and the default (no JS), as on the site. She stands at the
    banner's right over the Henesys night, on a warm glow so her dark hair and jacket read against the sky, and the STATUS
-   window below cuts her off like the site's patch card. --on is a shown picture's opacity. She ignores the mouse. */
+   window below cuts her off like the site's patch card. --on is a shown picture's opacity. She ignores the mouse. Every
+   picture is fitted by height into the square rotor, so the taller chin-heart (640×933, the site's img.tall) keeps the banner's height. */
 .scene-rotor { position: absolute; z-index: 1; right: max(48px, calc(50% - 494px)); bottom: 0; height: min(calc(100% - 70px), 400px); aspect-ratio: 1; pointer-events: none; user-select: none; --on: 1; }
 .scene-rotor::before { content: ""; position: absolute; inset: 12% 2% -6%; border-radius: 50%; background: radial-gradient(closest-side, #ff8a3d4d, #ff8a3d1f 55%, transparent); }
 .scene-rotor > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; object-position: center bottom; opacity: 0; filter: drop-shadow(4px 4px 0 #0009) drop-shadow(0 6px 16px #0008); transition: opacity .9s ease; }
@@ -58,7 +59,9 @@ body[data-mascot="chin-hands"] .pic-chin-hands,
 body[data-mascot="crossed"] .pic-crossed,
 body[data-mascot="point-wink"] .pic-point-wink,
 body[data-mascot="point"] .pic-point,
-body[data-mascot="cozy"] .pic-cozy { opacity: var(--on); }
+body[data-mascot="reach-wink"] .pic-reach-wink,
+body[data-mascot="cozy"] .pic-cozy,
+body[data-mascot="chin-heart"] .pic-chin-heart { opacity: var(--on); }
 
 .masthead { position: relative; z-index: 1; display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; max-width: 1100px; height: 100%; margin: 0 auto; padding: 28px 40px; }
 .brand { display: flex; align-items: center; gap: 12px; }
