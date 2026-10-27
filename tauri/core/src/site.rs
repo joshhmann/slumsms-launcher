@@ -1,7 +1,7 @@
-//! Signing in to the SlumsMS website (ticket 104, level 1: the launcher knows who you are). The launcher uses the
-//! site's own login service (docs/site/LOGIN.md in SlumsMS-site): it asks for a code, the player types
-//! `@weblogin CODE` in game, and the service hands back its signed session token. No game password is ever asked
-//! for or stored; the only thing kept is that revocable token (see `token_store`), one per site.
+//! Signing in to the SlumsMS website (tickets 104 level 1 and 105: the launcher knows who you are). The launcher uses
+//! the site's own login service (docs/site/LOGIN.md in SlumsMS-site): the game username and password, or an invite
+//! code and a new account, go to the site, which has the game server check them and hands back its signed session
+//! token. No password is ever stored; the only thing kept is that revocable token (see `token_store`), one per site.
 //!
 //! Live talks only to the live site and Test/RC only to the TEST site, so a token never crosses between them.
 
@@ -16,11 +16,9 @@ use url::Url;
 pub const LIVE_SITE: &str = "https://theslumsms.asslorde.com";
 /// The TEST copy of the site (tools/site/test164 in SlumsMS-site): plain HTTP on the LAN, for Test and RC.
 pub const TEST_SITE: &str = "http://192.168.0.164:8192";
-pub const POLL_EVERY: Duration = Duration::from_secs(3);
 const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BODY: usize = 64 * 1024;
 const MAX_TOKEN: usize = 4096;
-const PENDING_COOKIE: &str = "slums_pending";
 const SESSION_COOKIE: &str = "slums_session";
 
 /// The site a channel signs in to.
@@ -82,7 +80,7 @@ fn cookie_header(token: &str) -> String {
     format!("{SESSION_COOKIE}={token}")
 }
 
-/// Session and pending tokens are URL-safe base64 (plus one "." in a session); anything else is refused so it
+/// Session tokens are URL-safe base64 (plus one "." in a session); anything else is refused so it
 /// can't smuggle a header or a second cookie.
 pub fn valid_token(token: &str) -> bool {
     !token.is_empty() && token.len() <= MAX_TOKEN && token.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
@@ -108,67 +106,6 @@ async fn json_body(response: reqwest::Response) -> Result<Value> {
 /// A character name as shown: printable, at most 32 characters (the service's own limit).
 fn clean_name(value: Option<&Value>) -> String {
     value.and_then(Value::as_str).unwrap_or("").chars().filter(|c| !c.is_control()).take(32).collect()
-}
-
-/// A code waiting for `@weblogin`. `secret` is the private pending cookie; it lives in memory only.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pending {
-    pub code: String,
-    pub secret: String,
-    pub expires_in: u64,
-}
-
-/// POST /api/login/start: a new code for the player to type in game.
-pub async fn start(base: &str) -> Result<Pending> {
-    let response = client().post(endpoint(base, "/api/login/start")?).header("Content-Length", "0").send().await.map_err(offline)?;
-    let status = response.status().as_u16();
-    let secret = set_cookie(&response, PENDING_COOKIE);
-    let body = json_body(response).await.ok();
-    if status == 429 {
-        return Err(Error::new("Too many tries. Wait a minute and try again."));
-    }
-    let (Some(body), Some(secret)) = (body.filter(|_| status == 200), secret) else {
-        return Err(Error::new(format!("The website's sign-in is not available (HTTP {status}).")));
-    };
-    let code = body.get("code").and_then(Value::as_str).unwrap_or("");
-    if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()) || !valid_token(&secret) {
-        return Err(Error::permanent("The website gave an answer the launcher can't read."));
-    }
-    let expires_in = body.get("expires_in").and_then(Value::as_u64).unwrap_or(600).min(3600);
-    Ok(Pending { code: code.to_string(), secret, expires_in })
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Poll {
-    /// The code has not been typed in game yet.
-    Waiting,
-    /// The code ran out (or the service restarted): get a new one.
-    Expired,
-    SignedIn { token: String, character: String },
-}
-
-/// GET /api/login/poll with the pending cookie.
-pub async fn poll(base: &str, pending: &Pending) -> Result<Poll> {
-    let response = client().get(endpoint(base, "/api/login/poll")?).header("Cookie", format!("{PENDING_COOKIE}={}", pending.secret)).send().await.map_err(offline)?;
-    let status = response.status().as_u16();
-    if status == 410 {
-        return Ok(Poll::Expired);
-    }
-    if status == 429 {
-        return Ok(Poll::Waiting); // rate-limited: just ask again on the next round
-    }
-    let token = set_cookie(&response, SESSION_COOKIE);
-    if status != 200 {
-        return Err(Error::new(format!("The website's sign-in answered HTTP {status}.")));
-    }
-    let body = json_body(response).await?;
-    if body.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Ok(Poll::Waiting);
-    }
-    match token.filter(|t| valid_token(t)) {
-        Some(token) => Ok(Poll::SignedIn { token, character: clean_name(body.get("character")) }),
-        None => Err(Error::permanent("The website said yes but sent no session.")),
-    }
 }
 
 /// What a password sign-in or a sign-up got back: a session, or the site's own short message for the player

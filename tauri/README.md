@@ -138,10 +138,10 @@ What is new:
     silent, the old process kills it, moves its own exe back and carries on.
   - Debug builds, `--self-test`, `--no-self-update` and `SLUMSMS_NO_SELF_UPDATE=1` skip
     self-update.
-- **Website sign-in (1.6.0, tickets 104 and 105):** the STATUS strip shows "signed in as <character>" or a
-  Sign in link. The SIGN IN dialog has three ways in, all through the site's login service
-  (`docs/site/LOGIN.md` in SlumsMS-site): game username and password, a new account with an invite code, or a
-  code typed in game (`@weblogin`, polled every 3 s while the code lasts). Live signs in to
+- **Website sign-in (1.6.0, tickets 104 and 105, optional; Play works signed out):** the STATUS strip shows
+  "signed in as <character>" or a Sign in link. The SIGN IN dialog has two ways in, both through the site's login
+  service (`docs/site/LOGIN.md` in SlumsMS-site): game username and password, or a new account with an invite
+  code. Live signs in to
   `https://theslumsms.asslorde.com`; Test and RC sign in to the TEST site `http://192.168.0.164:8192` only (the one
   plain-HTTP origin allowed, besides loopback). The launcher keeps only the site's session token, never a password:
   the form clears the password field when it sends, and the core wipes its copy. It asks `/api/login/me` on start

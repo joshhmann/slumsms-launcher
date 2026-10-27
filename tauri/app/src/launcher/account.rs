@@ -1,18 +1,17 @@
 //! "Signed in as" (tickets 104 and 105): the launcher holds the website's revocable session token for the site that
-//! matches its channel (Live: the live site; Test and RC: the TEST site) and shows who it belongs to. Three ways in:
-//! a code typed in game (`@weblogin`), the game username and password, or an invite-code sign-up. A password only
-//! passes through to the site and is wiped here after the call; only the session token is kept (DPAPI file).
+//! matches its channel (Live: the live site; Test and RC: the TEST site) and shows who it belongs to. Two ways in:
+//! the game username and password, or an invite-code sign-up. A password only passes through to the site and is
+//! wiped here after the call; only the session token is kept (DPAPI file). Signing in is optional in 1.6.0.
 
 use super::*;
 use serde::Deserialize;
-use slums_core::site::{self, token_store, Account, Poll};
+use slums_core::site::{self, token_store, Account};
 
-/// The account strip's bookkeeping: which site the shown state belongs to, a running code sign-in, and a counter
-/// that makes answers for an older site or an older attempt drop out.
+/// The account strip's bookkeeping: which site the shown state belongs to, and a counter that makes answers for an
+/// older site or an older attempt drop out.
 #[derive(Default)]
 pub(super) struct AccountRun {
     pub(super) base: String,
-    cancel: Option<CancellationToken>,
     generation: u64,
 }
 
@@ -79,12 +78,9 @@ impl Launcher {
         true
     }
 
-    /// Start over for the current site: stop a running code sign-in and invalidate answers still on the way.
+    /// Start over for the current site: answers still on the way for an older attempt are dropped.
     fn reset_account_run(&self, base: &str) -> u64 {
         let mut run = self.account.lock().unwrap();
-        if let Some(cancel) = run.cancel.take() {
-            cancel.cancel();
-        }
         run.base = base.to_string();
         run.generation += 1;
         run.generation
@@ -103,14 +99,7 @@ impl Launcher {
     /// no longer accepts (expired, or the account is in revoked.txt) is deleted here.
     pub(super) async fn refresh_account(&self) {
         let base = self.site_base();
-        let generation = {
-            let run = self.account.lock().unwrap();
-            if run.base == base && run.cancel.is_some() {
-                return; // a code sign-in is running; it reports for itself
-            }
-            drop(run);
-            self.reset_account_run(&base)
-        };
+        let generation = self.reset_account_run(&base);
         let Some((token, character)) = token_store::load(&self.data_dir, &base) else {
             self.send_account(generation, self.account_json(&base, "signed-out", json!({})));
             return;
@@ -140,61 +129,12 @@ impl Launcher {
         }
         token_store::save(&self.data_dir, base, &token, &character).map_err(|e| e.message)?;
         self.log(&format!("Website: signed in to the {} site {how}.", site_label(base)));
-        self.account.lock().unwrap().cancel = None;
         let account = self.account_json(base, "signed-in", json!({ "character": character }));
         self.send_account(generation, account.clone());
         let alerts = site::alert_count(base, &token).await;
         if alerts.is_some() {
             self.send_account(generation, self.account_json(base, "signed-in", json!({ "character": character, "alerts": alerts })));
         }
-        Ok(account)
-    }
-
-    /// Ask the site for a code, show it, and wait (in the background) for the player to type it in game.
-    async fn begin_code(self: &Arc<Self>) -> Cmd<Value> {
-        let base = self.site_base();
-        let pending = site::start(&base).await.map_err(|e| e.message)?;
-        let generation = self.reset_account_run(&base);
-        let cancel = CancellationToken::new();
-        self.account.lock().unwrap().cancel = Some(cancel.clone());
-        let expires_at = now_ms() + pending.expires_in * 1000;
-        let account = self.account_json(&base, "code", json!({ "code": pending.code, "expiresAt": expires_at }));
-        self.send_account(generation, account.clone());
-        let me = self.clone();
-        tauri::async_runtime::spawn(async move {
-            let ended = |note: &str| me.account_json(&base, "signed-out", json!({ "note": note }));
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    _ = tokio::time::sleep(site::POLL_EVERY) => {}
-                }
-                if now_ms() > expires_at {
-                    me.account.lock().unwrap().cancel = None;
-                    me.send_account(generation, ended("That code ran out. Get a new one."));
-                    return;
-                }
-                match site::poll(&base, &pending).await {
-                    Ok(Poll::Waiting) => {}
-                    Err(e) if e.network => {} // keep trying until the code runs out
-                    Ok(Poll::Expired) => {
-                        me.account.lock().unwrap().cancel = None;
-                        me.send_account(generation, ended("That code ran out. Get a new one."));
-                        return;
-                    }
-                    Ok(Poll::SignedIn { token, character }) => {
-                        if let Err(message) = me.signed_in(&base, generation, token, character, "with a code typed in game").await {
-                            me.send_account(generation, ended(&message));
-                        }
-                        return;
-                    }
-                    Err(e) => {
-                        me.account.lock().unwrap().cancel = None;
-                        me.send_account(generation, ended(&e.message));
-                        return;
-                    }
-                }
-            }
-        });
         Ok(account)
     }
 
@@ -244,22 +184,6 @@ impl Launcher {
         }
         Ok(json!({ "bytes": bytes.len(), "plainOnDisk": plain_on_disk, "removed": true }))
     }
-}
-
-#[tauri::command]
-pub async fn account_code(launcher: L<'_>) -> Cmd<Value> {
-    launcher.inner().clone().begin_code().await
-}
-
-#[tauri::command]
-pub async fn account_cancel(launcher: L<'_>) -> Cmd<Value> {
-    let l = launcher.inner().clone();
-    let base = l.site_base();
-    let generation = l.reset_account_run(&base);
-    l.send_account(generation, l.account_json(&base, "signed-out", json!({})));
-    l.refresh_account().await;
-    let account = l.inner.lock().unwrap().state.get("account").cloned().unwrap_or(Value::Null);
-    Ok(account)
 }
 
 #[tauri::command]

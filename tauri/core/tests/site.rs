@@ -1,7 +1,7 @@
 //! The website sign-in calls against a stand-in for the site's login service (tools/site/login_service.py in
 //! SlumsMS-site): the same paths, cookies and answers.
 
-use slums_core::site::{self, Account, Poll};
+use slums_core::site::{self, Account};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -67,37 +67,24 @@ async fn serve(answer: impl Fn(&Seen) -> Reply + Send + Sync + 'static) -> (Stri
 }
 
 #[tokio::test]
-async fn a_code_typed_in_game_turns_into_a_session_and_me_reads_it_back() {
-    let typed = Arc::new(Mutex::new(false));
-    let typed_in_server = typed.clone();
-    let (base, log) = serve(move |seen| match (seen.method.as_str(), seen.path.as_str()) {
-        ("POST", "/api/login/start") => (200, vec!["slums_pending=sec-ret_1; Max-Age=600; Path=/; HttpOnly; SameSite=Lax".into()], r#"{"ok": true, "code": "K7Q4ZP", "expires_in": 600}"#.into()),
-        ("GET", "/api/login/poll") if seen.cookie.as_deref() != Some("slums_pending=sec-ret_1") => (410, vec![], r#"{"ok": false}"#.into()),
-        ("GET", "/api/login/poll") if !*typed_in_server.lock().unwrap() => (200, vec![], r#"{"ok": false, "waiting": true}"#.into()),
-        ("GET", "/api/login/poll") => (200, vec!["slums_session=eyJhIjoxfQ.mac_1; Max-Age=2592000; Path=/; HttpOnly".into(), "slums_pending=; Max-Age=0; Path=/".into()], r#"{"ok": true, "character": "Momo"}"#.into()),
-        ("GET", "/api/login/me") if seen.cookie.as_deref() == Some("slums_session=eyJhIjoxfQ.mac_1") => (200, vec![], r#"{"signed_in": true, "character": "Momo"}"#.into()),
-        ("GET", "/api/login/me") => (200, vec![], r#"{"signed_in": false, "character": null}"#.into()),
+async fn me_reads_a_session_back_and_a_revoked_one_comes_back_signed_out() {
+    let (base, log) = serve(|seen| match (seen.method.as_str(), seen.path.as_str()) {
+        ("GET", "/api/login/me") if seen.cookie.as_deref() == Some("slums_session=eyJhIjoxfQ.mac_1") => (200, vec![], r#"{"signed_in": true, "character": "Momo", "account": "momo"}"#.into()),
+        ("GET", "/api/login/me") => (200, vec![], r#"{"signed_in": false, "character": null, "account": null}"#.into()),
         ("GET", "/api/market/me") => (200, vec![], r#"{"ok": true, "badge": 2}"#.into()),
         ("POST", "/api/login/logout") => (200, vec!["slums_session=; Max-Age=0".into()], r#"{"ok": true}"#.into()),
         _ => (404, vec![], r#"{"ok": false}"#.into()),
     })
     .await;
-    let pending = site::start(&base).await.unwrap();
-    assert_eq!((pending.code.as_str(), pending.secret.as_str(), pending.expires_in), ("K7Q4ZP", "sec-ret_1", 600));
-    assert_eq!(site::poll(&base, &pending).await.unwrap(), Poll::Waiting);
-    *typed.lock().unwrap() = true;
-    let Poll::SignedIn { token, character } = site::poll(&base, &pending).await.unwrap() else { panic!("not signed in") };
-    assert_eq!((token.as_str(), character.as_str()), ("eyJhIjoxfQ.mac_1", "Momo"));
-    assert_eq!(site::me(&base, &token).await.unwrap().as_deref(), Some("Momo"));
-    assert_eq!(site::alert_count(&base, &token).await, Some(2));
-    // revoked.txt or an expired session: the service answers signed_in false and the launcher drops the token.
+    let token = "eyJhIjoxfQ.mac_1";
+    assert_eq!(site::me(&base, token).await.unwrap().as_deref(), Some("Momo"));
+    assert_eq!(site::alert_count(&base, token).await, Some(2));
+    // revoked.txt, a per-session revoke or an expired session: signed_in false, and the launcher drops the token.
     assert_eq!(site::me(&base, "eyJhIjoxfQ.revoked").await.unwrap(), None);
-    let stale = site::Pending { secret: "old".into(), ..pending.clone() };
-    assert_eq!(site::poll(&base, &stale).await.unwrap(), Poll::Expired);
-    site::logout(&base, &token).await;
+    site::logout(&base, token).await;
     let log = log.lock().unwrap();
-    assert!(log.iter().filter(|s| s.path.starts_with("/api/login/me") || s.path == "/api/market/me").all(|s| s.cookie.as_deref().is_some_and(|c| c.starts_with("slums_session="))));
-    assert!(log.iter().all(|s| !s.cookie.as_deref().unwrap_or("").contains(';')), "one cookie per request, nothing else");
+    assert!(log.iter().all(|s| s.cookie.as_deref().is_some_and(|c| c.starts_with("slums_session=") && !c.contains(';'))), "one session cookie per request, nothing else");
+    assert_eq!(log.last().unwrap().path, "/api/login/logout");
 }
 
 #[tokio::test]
@@ -131,7 +118,8 @@ async fn password_sign_in_and_invite_sign_up_give_a_session_or_the_sites_own_mes
 async fn an_unreachable_site_is_a_network_error_so_the_token_is_kept() {
     let error = site::me("http://127.0.0.1:9", "a.b").await.unwrap_err();
     assert!(error.network);
-    assert!(site::start("http://example.com").await.is_err(), "plain HTTP off the LAN TEST origin is refused before connecting");
+    let refused = site::sign_in_with_password("http://example.com", "momo", "secret1").await.unwrap_err();
+    assert!(!refused.network && refused.permanent, "plain HTTP off the LAN TEST origin is refused before connecting");
 }
 
 #[test]

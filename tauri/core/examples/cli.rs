@@ -4,9 +4,9 @@
 //!   cargo run -p slums-core --example cli -- probe   --feed URL
 //!   cargo run -p slums-core --example cli -- status  --feed URL --dir DIR
 //!   cargo run -p slums-core --example cli -- install --feed URL --dir DIR [--repair] [--user slumsdev]
-//!   cargo run -p slums-core --example cli -- site-code --site URL --dir DIR   (website sign-in by @weblogin code)
 //!   cargo run -p slums-core --example cli -- site-me   --site URL --dir DIR   (who the saved session is; drops a dead one)
 //!   cargo run -p slums-core --example cli -- site-out  --site URL --dir DIR
+//!   SLUMS_PASS=... cargo run -p slums-core --example cli -- site-signin --site URL --dir DIR --user NAME [site-signup: --code INVITE]
 
 use slums_core::channels::{probe_channels, Channel};
 use slums_core::http::FeedAccess;
@@ -75,26 +75,10 @@ async fn main() {
 
 /// The launcher's website sign-in without a window. DIR stands in for the launcher's data folder.
 async fn site_cli(command: &str, args: &[String]) {
-    use slums_core::site::{self, token_store, Poll};
+    use slums_core::site::{self, token_store};
     let base = arg(args, "--site").expect("--site URL");
     let dir = std::path::PathBuf::from(arg(args, "--dir").expect("--dir DIR"));
     match command {
-        "site-code" => {
-            let pending = site::start(&base).await.unwrap_or_else(|e| panic!("start: {}", e.message));
-            println!("type in game: @weblogin {}  ({} s)", pending.code, pending.expires_in);
-            loop {
-                tokio::time::sleep(site::POLL_EVERY).await;
-                match site::poll(&base, &pending).await {
-                    Ok(Poll::Waiting) => {}
-                    Ok(Poll::Expired) => return println!("code ran out"),
-                    Ok(Poll::SignedIn { token, character }) => {
-                        token_store::save(&dir, &base, &token, &character).expect("save");
-                        return println!("signed in as {character}; session saved in {}", token_store::path(&dir, &base).display());
-                    }
-                    Err(e) => println!("poll: {}", e.message),
-                }
-            }
-        }
         "site-me" => match token_store::load(&dir, &base) {
             None => println!("no saved session"),
             Some((token, character)) => match site::me(&base, &token).await {
@@ -106,6 +90,21 @@ async fn site_cli(command: &str, args: &[String]) {
                 Err(e) => println!("offline: {} (session kept)", e.message),
             },
         },
+        "site-signin" | "site-signup" => {
+            // The password comes from SLUMS_PASS, never the command line.
+            let user = arg(args, "--user").expect("--user NAME");
+            let mut pass = std::env::var("SLUMS_PASS").unwrap_or_default();
+            let answer = if command == "site-signup" { site::sign_up(&base, &arg(args, "--code").expect("--code INVITE"), &user, &pass).await } else { site::sign_in_with_password(&base, &user, &pass).await };
+            site::wipe(&mut pass);
+            match answer {
+                Ok(site::Account::SignedIn { token, character }) => {
+                    token_store::save(&dir, &base, &token, &character).expect("save");
+                    println!("signed in as {character}");
+                }
+                Ok(site::Account::Refused(message)) => println!("refused: {message}"),
+                Err(e) => println!("error: {}", e.message),
+            }
+        }
         "site-out" => {
             if let Some((token, _)) = token_store::load(&dir, &base) {
                 site::logout(&base, &token).await;
@@ -113,6 +112,6 @@ async fn site_cli(command: &str, args: &[String]) {
             token_store::clear(&dir, &base);
             println!("signed out");
         }
-        _ => eprintln!("site commands: site-code | site-me | site-out"),
+        _ => eprintln!("site commands: site-me | site-signin | site-signup | site-out"),
     }
 }

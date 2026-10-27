@@ -79,8 +79,6 @@ fn main() {
             launcher::reset_game_options,
             launcher::set_channel,
             launcher::answer_migration,
-            launcher::account::account_code,
-            launcher::account::account_cancel,
             launcher::account::account_sign_in,
             launcher::account::account_sign_up,
             launcher::account::account_sign_out,

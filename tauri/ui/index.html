@@ -142,17 +142,14 @@
         <div class="account-tabs" role="tablist" aria-label="How to sign in">
           <button class="account-tab" id="account-tab-password" type="button" role="tab" aria-selected="true">Username</button>
           <button class="account-tab" id="account-tab-signup" type="button" role="tab" aria-selected="false">New account</button>
-          <button class="account-tab" id="account-tab-code" type="button" role="tab" aria-selected="false">Code in game</button>
         </div>
         <form class="account-form" id="account-form" autocomplete="off">
           <label class="account-field" id="account-code-field" hidden>Invite code<input id="account-invite" name="invite" autocapitalize="characters" spellcheck="false"></label>
           <label class="account-field" id="account-user-field">Username<input id="account-user" name="user" autocapitalize="off" spellcheck="false" maxlength="32"></label>
           <label class="account-field" id="account-pass-field">Password<input id="account-pass" name="pass" type="password" maxlength="64"></label>
-          <p class="field-help" id="account-code-help" hidden>Get a code, then type <b>@weblogin</b> and the code in game, in any chat. The code works once, for 10 minutes.</p>
-          <p class="account-waiting" id="account-waiting" hidden>In game, type <code>@weblogin <span id="account-code"></span></code> <span class="account-time" id="account-time"></span></p>
           <p class="error-message" id="account-error" role="alert" hidden></p>
           <div class="button-row"><button class="button button-secondary" id="account-submit" type="submit">Sign in</button></div>
-          <p class="field-help">Your game account on <span id="account-site">SlumsMS</span>. The launcher never keeps your password, only a sign-in you can end with Sign out.</p>
+          <p class="field-help">Your game account on <span id="account-site">SlumsMS</span>. The launcher never keeps your password, only a sign-in you can end with Sign out. Signing in is optional: Play works without it.</p>
         </form>
       </div>
     </dialog>

@@ -255,6 +255,3 @@ footer { display: flex; align-items: baseline; gap: 8px; margin-top: 12px; paddi
 .account-tab[aria-selected="true"] { color: var(--gold-light); border-color: var(--gold-soft); background: var(--panel-head); }
 .account-form { display: flex; flex-direction: column; gap: 10px; }
 .account-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 700; color: #c8d2e6; }
-.account-waiting { margin: 0; font-size: 13px; color: #c8d2e6; }
-.account-waiting code { padding: 2px 6px; border: 1px solid var(--gold-soft); border-radius: 3px; color: var(--gold-light); background: var(--navy-ink); font-size: 15px; letter-spacing: 1px; }
-.account-time { color: var(--muted); font-size: 11px; }

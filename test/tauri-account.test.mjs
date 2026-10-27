@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { accountRow, codeTimeLeft, formProblem } from '../tauri/ui/account.mjs';
+import { accountRow, formProblem } from '../tauri/ui/account.mjs';
 
 test('the STATUS strip says who is signed in, with the alert count and the TEST site marked', () => {
   assert.deepEqual(accountRow({ status: 'signed-in', site: 'Live', character: 'Momo', alerts: 2 }),
@@ -13,19 +13,10 @@ test('the STATUS strip says who is signed in, with the alert count and the TEST 
   assert.equal(accountRow({ status: 'signed-in', site: 'Live', character: '' }).value, 'your account');
 });
 
-test('signed out offers Sign in and passes on why; a running code offers Cancel', () => {
+test('signed out offers Sign in and passes on why', () => {
   assert.deepEqual(accountRow({ status: 'signed-out', site: 'Live', note: 'The website signed you out. Sign in again.' }),
     { label: 'website', value: 'not signed in', alerts: '', action: 'Sign in', note: 'The website signed you out. Sign in again.' });
-  const waiting = accountRow({ status: 'code', site: 'Live', code: 'K7Q4ZP', expiresAt: 0 });
-  assert.equal(waiting.value, 'waiting for @weblogin K7Q4ZP');
-  assert.equal(waiting.action, 'Cancel');
   assert.equal(accountRow(null).action, '', 'nothing to press before the launcher has said');
-});
-
-test('a code counts down in minutes and seconds and stops at zero', () => {
-  assert.equal(codeTimeLeft(600_000, 0), '10:00 left');
-  assert.equal(codeTimeLeft(61_500, 0), '1:02 left');
-  assert.equal(codeTimeLeft(0, 5000), '0:00 left');
 });
 
 test('the forms only stop empty fields; the game server judges the rest', () => {
@@ -50,4 +41,11 @@ test('the sign-in dialog never asks the browser to remember a password', () => {
   const form = html.slice(html.indexOf('id="account-form"'), html.indexOf('</form>', html.indexOf('id="account-form"')));
   assert.match(html, /<form class="account-form" id="account-form" autocomplete="off">/u);
   assert.equal((form.match(/type="password"/gu) ?? []).length, 1);
+});
+
+test('the sign-in dialog has two ways in, Username and New account, and no in-game code', () => {
+  const html = readFileSync(new URL('../tauri/ui/index.html', import.meta.url), 'utf8');
+  const tabs = [...html.matchAll(/id="account-tab-(\w+)"/gu)].map((m) => m[1]);
+  assert.deepEqual(tabs, ['password', 'signup']);
+  assert.doesNotMatch(html, /weblogin/u);
 });

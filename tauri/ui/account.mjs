@@ -1,10 +1,10 @@
-// "Signed in as" (tickets 104 and 105): one row in the STATUS strip, and a small dialog with three ways to sign in
-// to the website: the game username and password, a new account with an invite code, or a code typed in game
-// (@weblogin). The launcher's main process talks to the site and keeps the session; the page only ever sees the
-// account state ({ status, site, character, alerts, offline, code, expiresAt, note }). Passwords are cleared from
-// the form as soon as they are sent.
+// "Signed in as" (tickets 104 and 105): one row in the STATUS strip, and a small dialog with two ways to sign in
+// to the website: the game username and password, or a new account with an invite code. Signing in is optional in
+// 1.6.0. The launcher's main process talks to the site and keeps the session; the page only ever sees the account
+// state ({ status, site, character, alerts, offline, note }). Passwords are cleared from the form as soon as they
+// are sent.
 
-const MODES = ['password', 'signup', 'code'];
+const MODES = ['password', 'signup'];
 
 /** What the strip shows for an account state. */
 export function accountRow(account) {
@@ -14,19 +14,11 @@ export function accountRow(account) {
       const alerts = Number.isInteger(account.alerts) && account.alerts > 0 ? `${account.alerts} new price alert${account.alerts === 1 ? '' : 's'}` : '';
       return { label: 'signed in as', value: `${account.character || 'your account'}${site}`, alerts, action: 'Sign out', note: account.offline ? 'website not reachable' : '' };
     }
-    case 'code':
-      return { label: 'website', value: `waiting for @weblogin ${account.code}${site}`, alerts: '', action: 'Cancel', note: '' };
     case 'signed-out':
       return { label: 'website', value: `not signed in${site}`, alerts: '', action: 'Sign in', note: account.note ?? '' };
     default:
       return { label: 'website', value: '…', alerts: '', action: '', note: '' };
   }
-}
-
-/** "9:41 left" for a code that runs out at `expiresAt` (ms). */
-export function codeTimeLeft(expiresAt, now = Date.now()) {
-  const seconds = Math.max(0, Math.ceil((expiresAt - now) / 1000));
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} left`;
 }
 
 /** The checks the launcher makes before sending (the game server makes the real ones and says why). */
@@ -38,11 +30,11 @@ export function formProblem(mode, { code = '', user = '', pass = '' }) {
 }
 
 export function startAccount({ doc = document, bridge = window.launcher, onState = bridge?.onState } = {}) {
-  const methods = ['signInCode', 'cancelSignIn', 'signIn', 'signUp', 'signOut', 'openMarket'];
+  const methods = ['signIn', 'signUp', 'signOut', 'openMarket'];
   if (!methods.every((m) => typeof bridge?.[m] === 'function') || typeof onState !== 'function') return () => {};
   const $ = (id) => doc.getElementById(id);
   const row = $('account-row'), dialog = $('account-dialog'), form = $('account-form'), error = $('account-error');
-  let account = null, mode = 'password', busy = false, ticker = null;
+  let account = null, mode = 'password', busy = false;
 
   const remote = (e) => String(e?.message ?? e).replace(/^Error invoking remote method '[^']+': (?:Error: )?/u, '');
   const showError = (text) => { error.textContent = text; error.hidden = !text; };
@@ -62,7 +54,6 @@ export function startAccount({ doc = document, bridge = window.launcher, onState
   }
 
   function renderDialog() {
-    const waiting = account?.status === 'code';
     for (const m of MODES) {
       const tab = $(`account-tab-${m}`);
       tab.setAttribute('aria-selected', String(m === mode));
@@ -70,24 +61,14 @@ export function startAccount({ doc = document, bridge = window.launcher, onState
     }
     form.dataset.mode = mode;
     $('account-code-field').hidden = mode !== 'signup';
-    $('account-user-field').hidden = mode === 'code';
-    $('account-pass-field').hidden = mode === 'code';
-    $('account-code-help').hidden = mode !== 'code';
-    $('account-submit').textContent = mode === 'signup' ? 'Create account' : mode === 'code' ? (waiting ? 'Get a new code' : 'Get a code') : 'Sign in';
+    $('account-submit').textContent = mode === 'signup' ? 'Create account' : 'Sign in';
     $('account-submit').disabled = busy;
-    $('account-waiting').hidden = !(mode === 'code' && waiting);
-    if (waiting) {
-      $('account-code').textContent = account.code;
-      $('account-time').textContent = codeTimeLeft(account.expiresAt);
-    }
     $('account-site').textContent = account?.site === 'TEST' ? 'the TEST server' : 'SlumsMS';
   }
 
   function render() {
     renderRow();
     if (dialog.open) renderDialog();
-    clearInterval(ticker);
-    ticker = account?.status === 'code' && dialog.open ? setInterval(renderDialog, 1000) : null;
   }
 
   function receive(next) {
@@ -100,10 +81,9 @@ export function startAccount({ doc = document, bridge = window.launcher, onState
 
   function open() {
     showError('');
-    if (account?.status === 'code') mode = 'code';
     dialog.showModal();
     render();
-    (mode === 'signup' ? $('account-invite') : mode === 'code' ? $('account-submit') : $('account-user')).focus();
+    (mode === 'signup' ? $('account-invite') : $('account-user')).focus();
   }
 
   async function run(task) {
@@ -122,7 +102,6 @@ export function startAccount({ doc = document, bridge = window.launcher, onState
 
   $('account-action').addEventListener('click', () => {
     if (account?.status === 'signed-in') run(() => bridge.signOut().then((a) => receive({ account: a })));
-    else if (account?.status === 'code') run(() => bridge.cancelSignIn().then((a) => receive({ account: a })));
     else open();
   });
   $('account-alerts').addEventListener('click', () => bridge.openMarket().catch(() => {}));
@@ -134,10 +113,6 @@ export function startAccount({ doc = document, bridge = window.launcher, onState
   form.addEventListener('submit', (event) => {
     event.preventDefault();
     if (busy) return;
-    if (mode === 'code') {
-      run(() => bridge.signInCode().then((a) => receive({ account: a })));
-      return;
-    }
     const value = { code: $('account-invite').value, user: $('account-user').value, pass: $('account-pass').value };
     clearPasswords();
     const problem = formProblem(mode, value);
@@ -147,7 +122,7 @@ export function startAccount({ doc = document, bridge = window.launcher, onState
   });
 
   const stop = onState(receive);
-  return () => { stop?.(); clearInterval(ticker); };
+  return stop ?? (() => {});
 }
 
 if (typeof document !== 'undefined') {
