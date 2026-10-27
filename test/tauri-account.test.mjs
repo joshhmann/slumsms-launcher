@@ -49,3 +49,11 @@ test('the sign-in dialog has two ways in, Username and New account, and no in-ga
   assert.deepEqual(tabs, ['password', 'signup']);
   assert.doesNotMatch(html, /weblogin/u);
 });
+
+test('the New account tab links to the site\'s "How to join" page, and only that tab shows it', () => {
+  const html = readFileSync(new URL('../tauri/ui/index.html', import.meta.url), 'utf8');
+  const page = readFileSync(new URL('../tauri/ui/account.mjs', import.meta.url), 'utf8');
+  assert.match(html, /<button class="link-button account-forgot" id="account-join" type="button" [^>]*hidden>New to SlumsMS\? How to join<\/button>/u);
+  assert.match(page, /\$\('account-join'\)\.hidden = mode !== 'signup';/u);
+  assert.match(page, /\$\('account-forgot'\)\.hidden = mode !== 'password';/u);
+});

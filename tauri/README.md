@@ -148,7 +148,8 @@ What is new:
   and every 10 minutes, and deletes a session the site no longer accepts (expired, or the account in
   `revoked.txt`). Sign out deletes it too. Price alerts come from `/api/market/me` (`badge`); the link opens the
   market in the browser. "Forgot password?" (Username tab) opens the site's `/forgot/` page in the browser; resets
-  are approved by the owner in game (ticket 107), never in the launcher. `--site-url=http://127.0.0.1:PORT` points a development build at a local login service.
+  are approved by the owner in game (ticket 107), never in the launcher. "New to SlumsMS? How to join" (New account
+  tab) opens the site's public `/join/` page the same way. `--site-url=http://127.0.0.1:PORT` points a development build at a local login service.
 - **WebView2 missing or broken:** a plain dialog explains it and offers Microsoft's download page.
   The window opens hidden and appears once it is set up, so it never flashes white.
 

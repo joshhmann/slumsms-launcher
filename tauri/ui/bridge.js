@@ -15,7 +15,7 @@
     settings: 'settings', saveFeed: 'save_feed', resetFeed: 'reset_feed', saveAccessKey: 'save_access_key', clearAccessKey: 'clear_access_key',
     chooseFolder: 'choose_folder', openFolder: 'open_folder', resetFolder: 'reset_folder', check: 'check', update: 'update', repair: 'repair', play: 'play',
     gameOptions: 'game_options', saveGameOptions: 'save_game_options', resetGameOptions: 'reset_game_options', setChannel: 'set_channel', answerMigration: 'answer_migration',
-    signIn: 'account_sign_in', signUp: 'account_sign_up', signOut: 'account_sign_out', openMarket: 'open_market', openForgot: 'open_forgot',
+    signIn: 'account_sign_in', signUp: 'account_sign_up', signOut: 'account_sign_out', openMarket: 'open_market', openForgot: 'open_forgot', openJoin: 'open_join',
   };
   const launcher = Object.fromEntries(Object.entries(commands).map(([name, command]) => [name, call(command)]));
   launcher.onState = (callback) => {

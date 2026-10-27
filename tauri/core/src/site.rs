@@ -218,6 +218,14 @@ pub fn forgot_url(base: &str) -> Option<String> {
     endpoint(base, FORGOT_PATH).ok().map(|u| u.to_string())
 }
 
+/// The site's public "How to join" page (invite code, sign up, launcher, install, log in), linked from the New
+/// account tab.
+pub const JOIN_PATH: &str = "/join/";
+
+pub fn join_url(base: &str) -> Option<String> {
+    endpoint(base, JOIN_PATH).ok().map(|u| u.to_string())
+}
+
 /// Where the market page is, for the "price alerts" link.
 pub fn market_url(base: &str) -> Option<String> {
     endpoint(base, "/market/").ok().map(|u| u.to_string())
@@ -335,6 +343,8 @@ mod tests {
         assert_eq!(site_for(Channel::Rc), "http://192.168.0.164:8192");
         assert_eq!(forgot_url(LIVE_SITE).as_deref(), Some("https://theslumsms.asslorde.com/forgot/"));
         assert_eq!(forgot_url(TEST_SITE).as_deref(), Some("http://192.168.0.164:8192/forgot/"));
+        assert_eq!(join_url(LIVE_SITE).as_deref(), Some("https://theslumsms.asslorde.com/join/"));
+        assert_eq!(join_url(TEST_SITE).as_deref(), Some("http://192.168.0.164:8192/join/"));
         assert_eq!(site_tag(LIVE_SITE), "live");
         assert_eq!(site_tag("http://192.168.0.164:8192/"), "test");
         assert_eq!(site_tag("http://127.0.0.1:9"), "dev");

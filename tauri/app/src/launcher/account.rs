@@ -211,6 +211,16 @@ pub async fn open_forgot(launcher: L<'_>) -> Cmd<()> {
     Ok(())
 }
 
+/// "New to SlumsMS? How to join": the site's join page for the current channel, in the browser.
+#[tauri::command]
+pub async fn open_join(launcher: L<'_>) -> Cmd<()> {
+    let url = site::join_url(&launcher.site_base()).ok_or("The website address is not a URL.")?;
+    if !platform::open_path(&url) {
+        return Err("Could not open the browser.".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn open_market(launcher: L<'_>) -> Cmd<()> {
     let url = site::market_url(&launcher.site_base()).ok_or("The website address is not a URL.")?;
