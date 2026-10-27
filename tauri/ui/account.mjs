@@ -1,6 +1,6 @@
 // "Signed in as" (tickets 104 and 105): one row in the STATUS strip, and a small dialog with two ways to sign in
 // to the website: the game username and password, or a new account with an invite code. Signing in is optional in
-// 1.6.0. The launcher's main process talks to the site and keeps the session; the page only ever sees the account
+// 1.6.0. "Forgot password?" only opens the site's page in the browser (the owner approves resets in game, ticket 107). The launcher's main process talks to the site and keeps the session; the page only ever sees the account
 // state ({ status, site, character, alerts, offline, note }). Passwords are cleared from the form as soon as they
 // are sent.
 
@@ -30,7 +30,7 @@ export function formProblem(mode, { code = '', user = '', pass = '' }) {
 }
 
 export function startAccount({ doc = document, bridge = window.launcher, onState = bridge?.onState } = {}) {
-  const methods = ['signIn', 'signUp', 'signOut', 'openMarket'];
+  const methods = ['signIn', 'signUp', 'signOut', 'openMarket', 'openForgot'];
   if (!methods.every((m) => typeof bridge?.[m] === 'function') || typeof onState !== 'function') return () => {};
   const $ = (id) => doc.getElementById(id);
   const row = $('account-row'), dialog = $('account-dialog'), form = $('account-form'), error = $('account-error');
@@ -61,6 +61,7 @@ export function startAccount({ doc = document, bridge = window.launcher, onState
     }
     form.dataset.mode = mode;
     $('account-code-field').hidden = mode !== 'signup';
+    $('account-forgot').hidden = mode !== 'password';
     $('account-submit').textContent = mode === 'signup' ? 'Create account' : 'Sign in';
     $('account-submit').disabled = busy;
     $('account-site').textContent = account?.site === 'TEST' ? 'the TEST server' : 'SlumsMS';
@@ -105,6 +106,7 @@ export function startAccount({ doc = document, bridge = window.launcher, onState
     else open();
   });
   $('account-alerts').addEventListener('click', () => bridge.openMarket().catch(() => {}));
+  $('account-forgot').addEventListener('click', () => bridge.openForgot().catch((e) => showError(remote(e))));
   for (const m of MODES) {
     $(`account-tab-${m}`).addEventListener('click', () => { mode = m; showError(''); clearPasswords(); render(); });
   }

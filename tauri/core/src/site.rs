@@ -211,6 +211,13 @@ pub async fn logout(base: &str, token: &str) {
     }
 }
 
+/// The site's forgot-password page (ticket 107: the owner approves resets in game; the launcher only links to it).
+pub const FORGOT_PATH: &str = "/forgot/";
+
+pub fn forgot_url(base: &str) -> Option<String> {
+    endpoint(base, FORGOT_PATH).ok().map(|u| u.to_string())
+}
+
 /// Where the market page is, for the "price alerts" link.
 pub fn market_url(base: &str) -> Option<String> {
     endpoint(base, "/market/").ok().map(|u| u.to_string())
@@ -326,6 +333,8 @@ mod tests {
         assert_eq!(site_for(Channel::Live), "https://theslumsms.asslorde.com");
         assert_eq!(site_for(Channel::Test), "http://192.168.0.164:8192");
         assert_eq!(site_for(Channel::Rc), "http://192.168.0.164:8192");
+        assert_eq!(forgot_url(LIVE_SITE).as_deref(), Some("https://theslumsms.asslorde.com/forgot/"));
+        assert_eq!(forgot_url(TEST_SITE).as_deref(), Some("http://192.168.0.164:8192/forgot/"));
         assert_eq!(site_tag(LIVE_SITE), "live");
         assert_eq!(site_tag("http://192.168.0.164:8192/"), "test");
         assert_eq!(site_tag("http://127.0.0.1:9"), "dev");

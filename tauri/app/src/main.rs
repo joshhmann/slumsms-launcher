@@ -83,6 +83,7 @@ fn main() {
             launcher::account::account_sign_up,
             launcher::account::account_sign_out,
             launcher::account::open_market,
+            launcher::account::open_forgot,
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {

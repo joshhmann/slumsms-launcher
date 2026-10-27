@@ -254,4 +254,5 @@ footer { display: flex; align-items: baseline; gap: 8px; margin-top: 12px; paddi
 .account-tab { flex: 1; padding: 6px 4px; border: 1px solid transparent; border-bottom: 0; border-radius: 3px 3px 0 0; color: var(--muted); background: none; font-size: 12px; font-weight: 700; }
 .account-tab[aria-selected="true"] { color: var(--gold-light); border-color: var(--gold-soft); background: var(--panel-head); }
 .account-form { display: flex; flex-direction: column; gap: 10px; }
+.account-forgot { align-self: flex-start; margin-top: -4px; font-size: 11px; }
 .account-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 700; color: #c8d2e6; }

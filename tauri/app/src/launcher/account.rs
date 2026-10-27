@@ -201,6 +201,16 @@ pub async fn account_sign_out(launcher: L<'_>) -> Cmd<Value> {
     Ok(launcher.inner().clone().sign_out().await)
 }
 
+/// "Forgot password?": the site's page for the current channel, in the browser. No reset happens in the launcher.
+#[tauri::command]
+pub async fn open_forgot(launcher: L<'_>) -> Cmd<()> {
+    let url = site::forgot_url(&launcher.site_base()).ok_or("The website address is not a URL.")?;
+    if !platform::open_path(&url) {
+        return Err("Could not open the browser.".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn open_market(launcher: L<'_>) -> Cmd<()> {
     let url = site::market_url(&launcher.site_base()).ok_or("The website address is not a URL.")?;
