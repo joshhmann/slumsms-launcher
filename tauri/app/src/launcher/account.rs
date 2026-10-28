@@ -259,3 +259,18 @@ pub async fn open_market(launcher: L<'_>) -> Cmd<()> {
     }
     Ok(())
 }
+
+/// "Report a bug": the site's report page for the current channel, tagged with this launcher's version and the game
+/// client's (slums-build.txt as "1.6.0+10600", else the installed client layer's version), in the browser.
+#[tauri::command]
+pub async fn open_report(launcher: L<'_>) -> Cmd<()> {
+    let dir = launcher.effective().install_dir;
+    let client = read_client_build(&dir).map(|b| format!("{}+{}", b.release, b.build)).or_else(|| {
+        read_installed_record(&dir).and_then(|r| r.layers.into_iter().find(|l| l.name == "client")).map(|l| l.version)
+    });
+    let url = site::report_url(&launcher.site_base(), VERSION, client.as_deref()).ok_or("The website address is not a URL.")?;
+    if !platform::open_path(&url) {
+        return Err("Could not open the browser.".into());
+    }
+    Ok(())
+}

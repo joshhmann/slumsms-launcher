@@ -281,6 +281,32 @@ pub fn market_url(base: &str) -> Option<String> {
     endpoint(base, "/market/").ok().map(|u| u.to_string())
 }
 
+/// The site's bug report page, tagged with this launcher's and the game client's versions so a report records what
+/// the player had. The site keeps each value only when it is 1-32 characters of [0-9A-Za-z.+_-], so anything else is
+/// left out here rather than sent.
+pub const REPORT_PATH: &str = "/report/";
+
+pub fn report_url(base: &str, launcher: &str, client: Option<&str>) -> Option<String> {
+    let mut url = endpoint(base, REPORT_PATH).ok()?;
+    {
+        let mut query = url.query_pairs_mut();
+        if valid_report_value(launcher) {
+            query.append_pair("launcher", launcher);
+        }
+        if let Some(client) = client.filter(|c| valid_report_value(c)) {
+            query.append_pair("client", client);
+        }
+    }
+    if url.query() == Some("") {
+        url.set_query(None);
+    }
+    Some(url.to_string())
+}
+
+fn valid_report_value(value: &str) -> bool {
+    (1..=32).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'_' | b'-'))
+}
+
 /// The session token kept on disk, one file per site in the launcher's data folder. On Windows the file holds
 /// the token encrypted with DPAPI for the current Windows user (CryptProtectData), so copying the file to
 /// another account or PC gives nothing; elsewhere (tests, the dev CLI) it is a 0600 file. The site's origin is

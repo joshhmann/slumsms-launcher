@@ -9,7 +9,7 @@ const elements = Object.fromEntries([
   'close-settings', 'install-dir', 'folder-source', 'choose-folder', 'open-folder', 'repair-files',
   'feed-form', 'feed-url', 'feed-help', 'feed-notice', 'save-feed', 'reset-feed', 'settings-error',
   'channel-name', 'channel-select', 'reset-folder', 'question-dialog', 'question-text', 'question-suggested', 'question-live', 'question-skip',
-  'version-info', 'open-options', 'options-dialog', 'close-options', 'options-notice', 'options-form', 'restore-options', 'options-saved', 'access-key-form', 'access-key', 'access-key-help', 'save-access-key', 'clear-access-key',
+  'version-info', 'open-report', 'open-options', 'options-dialog', 'close-options', 'options-notice', 'options-form', 'restore-options', 'options-saved', 'access-key-form', 'access-key', 'access-key-help', 'save-access-key', 'clear-access-key',
 ].map((id) => [id, document.getElementById(id)]));
 
 const phaseNames = {
@@ -544,6 +544,11 @@ elements['repair-files'].addEventListener('click', () => {
   void perform('update', () => bridge.repair());
 });
 elements['open-settings'].addEventListener('click', openSettings);
+// Older bridges (the Electron hand-over) have no report command; the button just hides.
+elements['open-report'].hidden = typeof bridge?.openReport !== 'function';
+elements['open-report'].addEventListener('click', () => {
+  bridge.openReport().then(() => { errorMessage = ''; render(); }, fail);
+});
 elements['open-options'].addEventListener('click', openOptions);
 elements['close-options'].addEventListener('click', () => elements['options-dialog'].close());
 elements['restore-options'].addEventListener('click', () => void saveOptions(() => bridge.resetGameOptions()));

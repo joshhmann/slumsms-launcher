@@ -149,3 +149,13 @@ async fn a_download_pass_comes_from_the_session_and_a_refusal_is_no_pass() {
     assert_eq!(site::download_pass(&missing, "good.one").await.unwrap(), None, "a site without the endpoint yet: key only");
     assert!(log.lock().unwrap().iter().all(|s| s.method == "POST" && s.body.is_empty()));
 }
+
+#[test]
+fn the_report_link_carries_only_versions_the_site_keeps() {
+    assert_eq!(site::report_url("https://slumsms.asslorde.com", "1.6.1", Some("1.6.0+10600")).as_deref(), Some("https://slumsms.asslorde.com/report/?launcher=1.6.1&client=1.6.0%2B10600"));
+    assert_eq!(site::report_url("https://slumsms.asslorde.com/", "1.6.1", None).as_deref(), Some("https://slumsms.asslorde.com/report/?launcher=1.6.1"));
+    // Anything outside 1-32 characters of [0-9A-Za-z.+_-] is left out, not sent.
+    assert_eq!(site::report_url("https://slumsms.asslorde.com", "1.6.1", Some("v83 2026")).as_deref(), Some("https://slumsms.asslorde.com/report/?launcher=1.6.1"));
+    assert_eq!(site::report_url("https://slumsms.asslorde.com", "", Some(&"9".repeat(33))).as_deref(), Some("https://slumsms.asslorde.com/report/"));
+    assert_eq!(site::report_url("not a url", "1.6.1", None), None);
+}
