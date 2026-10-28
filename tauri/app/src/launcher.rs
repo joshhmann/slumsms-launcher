@@ -378,7 +378,8 @@ impl Launcher {
     }
 
     // -----------------------------------------------------------------------------------------
-    // Start-up: one-time migration, channel probes, versions, the periodic availability check.
+    // Start-up: one-time migration, channel probes (only here and on a server/key change), versions, the periodic
+    // availability check.
 
     async fn startup(self: Arc<Self>, needs_migration: bool) {
         if needs_migration {
@@ -395,8 +396,8 @@ impl Launcher {
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(AVAILABLE_INTERVAL).await;
+                // Only the chosen channel: the others are probed at start-up and when the server or key changes.
                 if !me.busy.load(Ordering::SeqCst) {
-                    me.refresh_channels().await;
                     me.refresh_available(false).await;
                 }
                 // Also notices a session the site has since revoked.
