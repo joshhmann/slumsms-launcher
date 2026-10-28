@@ -13,7 +13,7 @@ use slums_core::config::{builtin_access_key, detect_bundled_client, clean_access
 use slums_core::error::{ACCESS_KEY_REQUIRED, CONFIG_MISSING, GAME_RUNNING};
 use slums_core::game_config::{game_running, read_game_config, write_game_config};
 use slums_core::game_options::{default_values, validate_changes};
-use slums_core::http::{FeedAccess, ACCESS_KEY_USER};
+use slums_core::http::{FeedAccess, ACCESS_KEY_USER, PASS_HEADER};
 use slums_core::install::{inspect_release, install_release, InspectResult, InstallOptions, Mode, Progress, ProgressFn};
 use slums_core::play::{play_plan, reuse_verified, PlayPlan, RecentVerify, VERIFIED_REUSE_MS};
 use slums_core::release::{check_available_release, load_release, read_installed_record, Available, Release, AVAILABLE_TIMEOUT};
@@ -106,6 +106,9 @@ struct Inner {
     page_ready_ms: Option<u128>,
     first_check_ms: Option<u128>,
     self_test_started: bool,
+    /// The signed-in account's download pass (ticket 106) and the site it came from. Memory only: the saved
+    /// session gets a fresh one on every start.
+    download_pass: Option<(String, slums_core::site::DownloadPass)>,
 }
 
 struct Effective {
@@ -226,7 +229,7 @@ impl Launcher {
             legacy_file,
             log_file,
             exe,
-            inner: Mutex::new(Inner { settings, probes: Probes::new(), state, last_verified: None, self_update_checked: false, skip_version: None, page_ready_ms: None, first_check_ms: None, self_test_started: false }),
+            inner: Mutex::new(Inner { settings, probes: Probes::new(), state, last_verified: None, self_update_checked: false, skip_version: None, page_ready_ms: None, first_check_ms: None, self_test_started: false, download_pass: None }),
             busy: AtomicBool::new(false),
             quitting: AtomicBool::new(false),
             operation_cancel_token: Mutex::new(None),
@@ -297,8 +300,11 @@ impl Launcher {
         self.effective_of(&self.inner.lock().unwrap())
     }
 
-    fn access(e: &Effective) -> slums_core::Result<FeedAccess> {
-        FeedAccess::new(&e.feed_url, &e.key, &e.user)
+    /// The key, plus the download pass when it came from this channel's site and has a minute left.
+    fn access(&self, e: &Effective) -> slums_core::Result<FeedAccess> {
+        let base = self.site_base_of(e.channel);
+        let pass = self.inner.lock().unwrap().download_pass.as_ref().filter(|(b, p)| *b == base && p.expires_at > slums_core::site::unix_now() + 60).map(|(_, p)| p.pass.clone());
+        Ok(FeedAccess::new(&e.feed_url, &e.key, &e.user)?.with_pass(pass.as_deref().unwrap_or("")))
     }
 
     fn effective_json(&self, inner: &Inner) -> Map<String, Value> {
@@ -382,8 +388,8 @@ impl Launcher {
         let _ = self.ready_tx.send(true);
         self.refresh_channels().await;
         let _ = self.probed_tx.send(true);
-        let me = self.clone();
-        tauri::async_runtime::spawn(async move { me.refresh_account().await });
+        // The account first (bounded), so the first check already carries its download pass.
+        let _ = tokio::time::timeout(Duration::from_secs(10), self.refresh_account()).await;
         self.refresh_versions(false).await;
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
@@ -535,7 +541,7 @@ impl Launcher {
             self.send(json!({ "available": { "status": "error" } }));
             return;
         }
-        let result = match Self::access(&e) {
+        let result = match self.access(&e) {
             Ok(access) => check_available_release(&e.feed_url, Some(&access), AVAILABLE_TIMEOUT).await,
             Err(error) => Available::Error { message: error.message },
         };
@@ -627,7 +633,7 @@ impl Launcher {
     /// mode Fast trusts files whose size and mtime match the install state; Full (Repair) hashes everything.
     async fn check_release(self: &Arc<Self>, mode: Mode) -> slums_core::Result<(Arc<Release>, InspectResult)> {
         let e = self.require_settings()?;
-        let access = Self::access(&e)?;
+        let access = self.access(&e)?;
         let cancel = self.operation_cancel();
         let release = Arc::new(load_release(&e.feed_url, Some(&e.install_dir), &access, &cancel).await?);
         self.send(json!({ "version": release.version, "news": release.news.clone().unwrap_or_default(), "available": available_from(&release), "message": "Checking installed game files." }));
@@ -647,7 +653,7 @@ impl Launcher {
     /// Download and verify what the folder lacks; also the first half of Play when a new release is out.
     async fn install_files(self: &Arc<Self>, mode: Mode, message: Option<String>) -> slums_core::Result<Arc<Release>> {
         let e = self.require_settings()?;
-        let access = Self::access(&e)?;
+        let access = self.access(&e)?;
         let cancel = self.operation_cancel();
         let release = Arc::new(load_release(&e.feed_url, Some(&e.install_dir), &access, &cancel).await?);
         let default_message = if mode == Mode::Full { "Verifying every file and repairing damage." } else { "Checking what is already installed." };
@@ -675,7 +681,7 @@ impl Launcher {
     async fn recently_verified(&self, e: &Effective) -> Option<Arc<Release>> {
         let (recent, release) = self.inner.lock().unwrap().last_verified.clone()?;
         let present = exists(&executable_path(&e.install_dir, &release.launch.executable));
-        let offered = if present { check_available_release(&e.feed_url, Self::access(e).ok().as_ref(), AVAILABLE_TIMEOUT).await } else { Available::Offline { message: String::new() } };
+        let offered = if present { check_available_release(&e.feed_url, self.access(e).ok().as_ref(), AVAILABLE_TIMEOUT).await } else { Available::Offline { message: String::new() } };
         reuse_verified(Some(&recent), &e.install_dir, &e.feed_url, now_ms(), VERIFIED_REUSE_MS, present, &offered).then_some(release)
     }
 
@@ -685,7 +691,7 @@ impl Launcher {
     async fn play_flow(self: &Arc<Self>) -> slums_core::Result<()> {
         let e = self.require_settings()?;
         self.send(json!({ "message": "Checking for updates…" }));
-        let access = Self::access(&e)?;
+        let access = self.access(&e)?;
         let offered = check_available_release(&e.feed_url, Some(&access), AVAILABLE_TIMEOUT).await;
         let record = read_installed_record(&e.install_dir);
         let plan = play_plan(&offered, record.as_ref());
@@ -776,11 +782,14 @@ impl Launcher {
 
     async fn try_self_update(self: &Arc<Self>, e: &Effective) -> Result<bool, String> {
         use tauri_plugin_updater::UpdaterExt;
-        let access = Self::access(e).map_err(|e| e.message)?;
+        let access = self.access(e).map_err(|e| e.message)?;
         let endpoint = url::Url::parse(&update_manifest_url(&e.feed_url)).map_err(|e| e.to_string())?;
         let mut builder = self.app.updater_builder().endpoints(vec![endpoint]).map_err(|e| e.to_string())?.timeout(Duration::from_secs(60));
         if !access.authorization().is_empty() {
             builder = builder.header("Authorization", access.authorization()).map_err(|e| e.to_string())?;
+        }
+        if !access.pass().is_empty() {
+            builder = builder.header(PASS_HEADER, access.pass()).map_err(|e| e.to_string())?;
         }
         let Some(update) = builder.build().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())? else {
             self.log("Self-update: no newer launcher on this channel.");

@@ -1,5 +1,6 @@
 //! Feed transport: HTTPS-only URLs (loopback HTTP for development), manual redirects, and an
-//! optional access key sent as HTTP Basic auth only to the feed's own origin. Port of the
+//! optional access key sent as HTTP Basic auth only to the feed's own origin, plus (ticket 106) the
+//! signed-in account's download pass as `X-Slums-Pass`, bound the same way. Port of the
 //! request/readJSON/feedAccess part of updater.mjs.
 
 use crate::error::{Error, Result, ACCESS_KEY_REQUIRED};
@@ -12,7 +13,9 @@ use url::Url;
 /// Basic-auth user for player keys. The dev key uses DEV_ACCESS_USER; the server decides which works.
 pub const ACCESS_KEY_USER: &str = "slums";
 pub const DEV_ACCESS_USER: &str = "slumsdev";
-pub const ACCESS_KEY_MESSAGE: &str = "This server needs an access key - enter it in Settings";
+pub const ACCESS_KEY_MESSAGE: &str = "This server needs you to sign in (or an access key in Settings)";
+/// The header the patch server reads a download pass from (nginx auth_request, beside the Basic key).
+pub const PASS_HEADER: &str = "X-Slums-Pass";
 pub const METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_MANIFEST_BYTES: usize = 128 * 1024 * 1024;
 
@@ -55,12 +58,20 @@ pub fn network_url(input: &str) -> Result<Url> {
     Ok(url)
 }
 
-/// An access key bound to the feed's origin. The Authorization header is only ever attached to
-/// requests whose origin equals that origin; an empty key yields no header at all.
-#[derive(Clone, Debug, Default)]
+/// An access key and a download pass, bound to the feed's origin. Their headers are only ever
+/// attached to requests whose origin equals that origin; an empty key or pass yields no header.
+/// While the patch server accepts either (the grace period), both are sent and either opens it.
+#[derive(Clone, Default)]
 pub struct FeedAccess {
     pub origin: Option<url::Origin>,
     authorization: String,
+    pass: String,
+}
+
+impl std::fmt::Debug for FeedAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FeedAccess({:?}, key: {}, pass: {})", self.origin, !self.authorization.is_empty(), !self.pass.is_empty())
+    }
 }
 
 impl FeedAccess {
@@ -72,7 +83,19 @@ impl FeedAccess {
         } else {
             format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{access_key}")))
         };
-        Ok(FeedAccess { origin: Some(origin), authorization })
+        Ok(FeedAccess { origin: Some(origin), authorization, pass: String::new() })
+    }
+    /// Add the account's download pass (an invalid one is left out).
+    pub fn with_pass(mut self, pass: &str) -> Self {
+        self.pass = if crate::site::valid_pass(pass) { pass.to_string() } else { String::new() };
+        self
+    }
+    /// The pass, for a client (the Tauri updater) that only ever talks to `origin`.
+    pub fn pass(&self) -> &str {
+        &self.pass
+    }
+    fn has_credentials(&self) -> bool {
+        !self.authorization.is_empty() || !self.pass.is_empty()
     }
     /// The header value, for a client (the Tauri updater) that only ever talks to `origin`.
     pub fn authorization(&self) -> &str {
@@ -101,7 +124,7 @@ pub fn cancelled(token: &CancellationToken) -> Error {
 pub async fn request(input: &str, cancel: &CancellationToken, access: Option<&FeedAccess>, extra: &[(&str, String)]) -> Result<(reqwest::Response, Url)> {
     let mut url = network_url(input)?;
     let secure = url.scheme() == "https";
-    let mut trusted = access.is_some_and(|a| !a.authorization.is_empty());
+    let mut trusted = access.is_some_and(FeedAccess::has_credentials);
     for redirects in 0..=5 {
         if secure && url.scheme() != "https" {
             return Err(Error::permanent("An HTTPS release cannot redirect to HTTP."));
@@ -114,7 +137,13 @@ pub async fn request(input: &str, cancel: &CancellationToken, access: Option<&Fe
             builder = builder.header(*name, value);
         }
         if trusted {
-            builder = builder.header("Authorization", &access.unwrap().authorization);
+            let a = access.unwrap();
+            if !a.authorization.is_empty() {
+                builder = builder.header("Authorization", &a.authorization);
+            }
+            if !a.pass.is_empty() {
+                builder = builder.header(PASS_HEADER, &a.pass);
+            }
         }
         let response = tokio::select! {
             biased;

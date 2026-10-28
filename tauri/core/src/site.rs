@@ -203,6 +203,56 @@ pub async fn alert_count(base: &str, token: &str) -> Option<u64> {
     json_body(response).await.ok()?.get("badge").and_then(Value::as_u64)
 }
 
+/// POST /api/login/download-pass (ticket 106): a short-lived pass for the patch server, tied to the signed-in account.
+pub const DOWNLOAD_PASS_PATH: &str = "/api/login/download-pass";
+const MAX_PASS: usize = 1024;
+
+/// A download pass and when it stops working (Unix seconds).
+#[derive(Clone, PartialEq, Eq)]
+pub struct DownloadPass {
+    pub pass: String,
+    pub expires_at: u64,
+}
+
+impl std::fmt::Debug for DownloadPass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DownloadPass(expires {})", self.expires_at)
+    }
+}
+
+/// Something that can go in an HTTP header: printable ASCII without spaces, at most MAX_PASS long.
+pub fn valid_pass(pass: &str) -> bool {
+    !pass.is_empty() && pass.len() <= MAX_PASS && pass.bytes().all(|b| b.is_ascii_graphic())
+}
+
+/// Read `{pass, expiresAt}`; anything else (a bad pass, a missing or past expiry) is None.
+pub fn parse_download_pass(body: &Value, now: u64) -> Option<DownloadPass> {
+    let pass = body.get("pass").and_then(Value::as_str).filter(|p| valid_pass(p))?;
+    let expires_at = body.get("expiresAt").and_then(Value::as_u64).filter(|&t| t > now)?;
+    Some(DownloadPass { pass: pass.to_string(), expires_at })
+}
+
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Ask for a download pass. Ok(None) when the site doesn't give one (signed out: 401, banned: 403, or no such
+/// endpoint yet: 404); the launcher then downloads with the access key alone. A network failure is an error.
+pub async fn download_pass(base: &str, token: &str) -> Result<Option<DownloadPass>> {
+    if !valid_token(token) {
+        return Ok(None);
+    }
+    let response = client().post(endpoint(base, DOWNLOAD_PASS_PATH)?).header("Cookie", cookie_header(token)).header("X-Slums", "1").header("Content-Length", "0").send().await.map_err(offline)?;
+    let status = response.status().as_u16();
+    if matches!(status, 401 | 403 | 404) {
+        return Ok(None);
+    }
+    if status != 200 {
+        return Err(Error::new(format!("The website's download pass answered HTTP {status}.")));
+    }
+    Ok(parse_download_pass(&json_body(response).await?, unix_now()))
+}
+
 /// POST /api/login/logout. Sessions are not stored on the server, so this only matters to a browser; the launcher
 /// forgets its token whatever the answer.
 pub async fn logout(base: &str, token: &str) {
@@ -395,5 +445,19 @@ mod tests {
         assert_eq!(clean_name(Some(&Value::from("Momo\u{7}"))), "Momo");
         assert_eq!(clean_name(Some(&Value::from("x".repeat(40)))).len(), 32);
         assert_eq!(clean_name(None), "");
+    }
+
+    #[test]
+    fn a_download_pass_needs_a_clean_pass_and_a_future_expiry() {
+        let now = 1_800_000_000;
+        let ok = parse_download_pass(&serde_json::json!({ "pass": "v1.acct.1800043200.sig", "expiresAt": now + 43_200 }), now).unwrap();
+        assert_eq!((ok.pass.as_str(), ok.expires_at), ("v1.acct.1800043200.sig", now + 43_200));
+        assert!(!format!("{ok:?}").contains("sig"), "Debug never shows the pass");
+        assert_eq!(parse_download_pass(&serde_json::json!({ "pass": "p", "expiresAt": now }), now), None, "already expired");
+        assert_eq!(parse_download_pass(&serde_json::json!({ "pass": "has space", "expiresAt": now + 1 }), now), None);
+        assert_eq!(parse_download_pass(&serde_json::json!({ "pass": "p\r\nX: y", "expiresAt": now + 1 }), now), None);
+        assert_eq!(parse_download_pass(&serde_json::json!({ "pass": "p".repeat(1025), "expiresAt": now + 1 }), now), None);
+        assert_eq!(parse_download_pass(&serde_json::json!({ "pass": "p", "expiresAt": "tomorrow" }), now), None);
+        assert_eq!(parse_download_pass(&serde_json::json!({ "expiresAt": now + 1 }), now), None);
     }
 }

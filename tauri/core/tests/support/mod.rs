@@ -39,7 +39,13 @@ pub enum Action {
 pub struct Logged {
     pub path: String,
     pub authorization: Option<String>,
+    pub pass: Option<String>,
     pub range: Option<String>,
+}
+
+/// An entry for `Server::require` that accepts this download pass (nginx `satisfy any`: a key or a pass).
+pub fn pass_entry(pass: &str) -> String {
+    format!("pass:{pass}")
 }
 
 type Hook = Arc<dyn Fn(&Logged, usize) -> Action + Send + Sync>;
@@ -83,7 +89,7 @@ impl Server {
                             headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
                         }
                     }
-                    let entry = Logged { path: path.clone(), authorization: headers.get("authorization").cloned(), range: headers.get("range").cloned() };
+                    let entry = Logged { path: path.clone(), authorization: headers.get("authorization").cloned(), pass: headers.get("x-slums-pass").cloned(), range: headers.get("range").cloned() };
                     let count = {
                         let mut log = l.lock().unwrap();
                         log.push(entry.clone());
@@ -91,7 +97,9 @@ impl Server {
                     };
                     let allowed = a.lock().unwrap().clone();
                     if let Some(allowed) = allowed {
-                        if !entry.authorization.as_ref().is_some_and(|h| allowed.contains(h)) {
+                        let key_ok = entry.authorization.as_ref().is_some_and(|h| allowed.contains(h));
+                        let pass_ok = entry.pass.as_ref().is_some_and(|p| allowed.contains(&pass_entry(p)));
+                        if !key_ok && !pass_ok {
                             let _ = socket.write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"x\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
                             return;
                         }

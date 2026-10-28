@@ -128,3 +128,24 @@ fn wipe_zeroes_the_buffer() {
     site::wipe(&mut secret);
     assert!(secret.is_empty());
 }
+
+#[tokio::test]
+async fn a_download_pass_comes_from_the_session_and_a_refusal_is_no_pass() {
+    let future = site::unix_now() + 43_200;
+    let (base, log) = serve(move |seen| match (seen.method.as_str(), seen.path.as_str(), seen.cookie.as_deref()) {
+        ("POST", site::DOWNLOAD_PASS_PATH, Some("slums_session=good.one")) => (200, vec![], format!(r#"{{"pass": "v1.momo.sig", "expiresAt": {future}}}"#)),
+        ("POST", site::DOWNLOAD_PASS_PATH, Some("slums_session=banned.one")) => (403, vec![], r#"{"ok": false}"#.into()),
+        ("POST", site::DOWNLOAD_PASS_PATH, Some("slums_session=broken.one")) => (500, vec![], "{}".into()),
+        ("POST", site::DOWNLOAD_PASS_PATH, _) => (401, vec![], r#"{"ok": false}"#.into()),
+        _ => (404, vec![], "{}".into()),
+    })
+    .await;
+    let pass = site::download_pass(&base, "good.one").await.unwrap().unwrap();
+    assert_eq!((pass.pass.as_str(), pass.expires_at), ("v1.momo.sig", future));
+    assert_eq!(site::download_pass(&base, "banned.one").await.unwrap(), None);
+    assert_eq!(site::download_pass(&base, "old.one").await.unwrap(), None);
+    assert!(site::download_pass(&base, "broken.one").await.is_err(), "a server error is not 'no pass'");
+    let (missing, _) = serve(|_| (404, vec![], "{}".into())).await;
+    assert_eq!(site::download_pass(&missing, "good.one").await.unwrap(), None, "a site without the endpoint yet: key only");
+    assert!(log.lock().unwrap().iter().all(|s| s.method == "POST" && s.body.is_empty()));
+}

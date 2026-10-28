@@ -1,7 +1,8 @@
 //! "Signed in as" (tickets 104 and 105): the launcher holds the website's revocable session token for the site that
 //! matches its channel (Live: the live site; Test and RC: the TEST site) and shows who it belongs to. Two ways in:
 //! the game username and password, or an invite-code sign-up. A password only passes through to the site and is
-//! wiped here after the call; only the session token is kept (DPAPI file). Signing in is optional in 1.6.0.
+//! wiped here after the call; only the session token is kept (DPAPI file). Signing in is optional in 1.6.0. From 1.6.1 a
+//! session also gets a download pass for the patch server (ticket 106), kept in memory and sent beside the key.
 
 use super::*;
 use serde::Deserialize;
@@ -55,10 +56,35 @@ fn check_field(value: &str, what: &str, max: usize) -> Cmd<()> {
 impl Launcher {
     /// The site this launcher signs in to now. `--site-url` (loopback only) is for development and self-tests.
     pub(super) fn site_base(&self) -> String {
+        self.site_base_of(self.effective().channel)
+    }
+
+    pub(super) fn site_base_of(&self, channel: Channel) -> String {
         if let Some(url) = &self.args.site_url {
             return url.trim_end_matches('/').to_string();
         }
-        site::site_for(self.effective().channel).to_string()
+        site::site_for(channel).to_string()
+    }
+
+    /// Get a download pass for this session unless the one held has over an hour left. A refusal (signed out,
+    /// banned, or a site without passes yet) drops it; a network failure keeps the old one until it runs out.
+    async fn refresh_pass(&self, base: &str, token: &str) {
+        let now = site::unix_now();
+        if self.inner.lock().unwrap().download_pass.as_ref().is_some_and(|(b, p)| b == base && p.expires_at > now + 3600) {
+            return;
+        }
+        match site::download_pass(base, token).await {
+            Ok(Some(pass)) => {
+                self.log(&format!("Website: got a download pass from the {} site ({} h left).", site_label(base), pass.expires_at.saturating_sub(now) / 3600));
+                self.inner.lock().unwrap().download_pass = Some((base.to_string(), pass));
+            }
+            Ok(None) => self.forget_pass(),
+            Err(error) => self.log(&format!("Website: no download pass this time ({}).", error.message)),
+        }
+    }
+
+    fn forget_pass(&self) {
+        self.inner.lock().unwrap().download_pass = None;
     }
 
     fn account_json(&self, base: &str, status: &str, extra: Value) -> Value {
@@ -108,11 +134,13 @@ impl Launcher {
         match site::me(&base, &token).await {
             Ok(Some(name)) => {
                 let name = if name.is_empty() { character } else { name };
+                self.refresh_pass(&base, &token).await;
                 let alerts = site::alert_count(&base, &token).await;
                 self.send_account(generation, self.account_json(&base, "signed-in", json!({ "character": name, "alerts": alerts })));
             }
             Ok(None) => {
                 token_store::clear(&self.data_dir, &base);
+                self.forget_pass();
                 self.log(&format!("Website: the {} site ended this sign-in (expired, or signed out everywhere).", site_label(&base)));
                 self.send_account(generation, self.account_json(&base, "signed-out", json!({ "note": "The website signed you out. Sign in again." })));
             }
@@ -131,6 +159,7 @@ impl Launcher {
         self.log(&format!("Website: signed in to the {} site {how}.", site_label(base)));
         let account = self.account_json(base, "signed-in", json!({ "character": character }));
         self.send_account(generation, account.clone());
+        self.refresh_pass(base, &token).await;
         let alerts = site::alert_count(base, &token).await;
         if alerts.is_some() {
             self.send_account(generation, self.account_json(base, "signed-in", json!({ "character": character, "alerts": alerts })));
@@ -162,6 +191,7 @@ impl Launcher {
             site::logout(&base, &token).await;
         }
         token_store::clear(&self.data_dir, &base);
+        self.forget_pass();
         self.log(&format!("Website: signed out of the {} site.", site_label(&base)));
         let account = self.account_json(&base, "signed-out", json!({}));
         self.send_account(generation, account.clone());

@@ -278,12 +278,49 @@ async fn a_cross_origin_redirect_drops_the_key_even_when_it_bounces_back() {
 }
 
 #[tokio::test]
+async fn a_download_pass_opens_the_feed_alone_or_beside_the_key() {
+    let dir = temp_dir("pass");
+    // After the grace period: no key at all, the pass alone.
+    let server = serve(&[base_layer(), client_layer("1.0", b"exe")], "1.0").await;
+    server.require(&[pass_entry("P1")]);
+    let with_pass = access(&server, "").with_pass("P1");
+    let release = load_release(&server.url("manifest.json"), Some(dir.to_str().unwrap()), &with_pass, &CancellationToken::new()).await.unwrap();
+    install(&dir, &Arc::new(release), fast()).await.unwrap();
+    assert!(server.requests().iter().all(|l| l.pass.as_deref() == Some("P1") && l.authorization.is_none()));
+    // The grace period: either one opens it, and both are sent.
+    server.require(&[basic("slums", "k"), pass_entry("P1")]);
+    for (key, pass) in [("k", ""), ("wrong", "P1"), ("k", "P1")] {
+        let a = access(&server, key).with_pass(pass);
+        assert!(check_available_release(&server.url("manifest.json"), Some(&a), AVAILABLE_TIMEOUT).await.is_ok(), "{key}/{pass}");
+    }
+    let a = access(&server, "wrong").with_pass("expired");
+    assert_eq!(check_available_release(&server.url("manifest.json"), Some(&a), AVAILABLE_TIMEOUT).await.status(), "access-key");
+    // A pass that could smuggle a header is never sent.
+    assert_eq!(access(&server, "k").with_pass("P1\r\nX: y").pass(), "");
+}
+
+#[tokio::test]
+async fn a_cross_origin_redirect_drops_the_pass() {
+    let feed = serve(&[client_layer("1.0", b"exe")], "1.0").await;
+    let cdn = Server::start().await;
+    cdn.put_all(feed.files.lock().unwrap().clone());
+    let cdn_base = cdn.base.clone();
+    feed.hook(move |l, _| if l.path.contains("/files/") { Action::Redirect(format!("{cdn_base}{}", &l.path[1..])) } else { Action::Serve });
+    let dir = temp_dir("cdn-pass");
+    let a = access(&feed, "").with_pass("P1");
+    let release = load_release(&feed.url("manifest.json"), Some(dir.to_str().unwrap()), &a, &CancellationToken::new()).await.unwrap();
+    install(&dir, &Arc::new(release), fast()).await.unwrap();
+    assert!(!cdn.requests().is_empty() && cdn.requests().iter().all(|l| l.pass.is_none()), "the CDN never sees the pass");
+    assert!(feed.requests().iter().all(|l| l.pass.as_deref() == Some("P1")));
+}
+
+#[tokio::test]
 async fn http_401_is_the_access_key_error_and_is_never_retried() {
     let server = serve(&[client_layer("1.0", b"exe")], "1.0").await;
     server.require(&[basic("slums", "right")]);
     let error = load(&server, &temp_dir("401"), "wrong").await.unwrap_err();
     assert!(error.is(ACCESS_KEY_REQUIRED));
-    assert_eq!(error.message, "This server needs an access key - enter it in Settings");
+    assert_eq!(error.message, "This server needs you to sign in (or an access key in Settings)");
     assert_eq!(server.requests().len(), 1);
     // Revoked mid-install: stops at once.
     let server = serve(&[base_layer(), client_layer("1.0", b"exe")], "1.0").await;

@@ -75,7 +75,7 @@ export function versionStatus(installed, available) {
   else if (!have) kind = 'unknown';
   else kind = have === offer ? 'up-to-date' : 'update-available';
 
-  const availableTitle = !offer && available?.status === 'access-key' ? 'The update server needs an access key.'
+  const availableTitle = !offer && available?.status === 'access-key' ? 'The update server needs you to sign in (or an access key).'
     : !offer && available?.status === 'offline' ? 'Could not reach the update server.'
       : !offer && available?.status === 'error' ? 'The update server sent an unexpected answer.'
         : layerText(available?.layers);
