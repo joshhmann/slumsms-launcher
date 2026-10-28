@@ -3,7 +3,7 @@
 //! address, so this module never creates it: a missing file is left to the install flow.
 
 use crate::error::{Error, Result, CONFIG_MISSING, GAME_RUNNING};
-use crate::game_options::{explicit_game_options, read_game_options, validate_changes, GameOptions};
+use crate::game_options::{explicit_game_options, get_profile_value, latin1_decode, parse_ini, read_game_options, validate_changes, GameOptions};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -81,6 +81,23 @@ pub fn read_game_config(install_dir: &str) -> Result<GameConfig> {
     Ok(match read_text(Path::new(install_dir))? {
         None => GameConfig::missing(),
         Some(text) => GameConfig::ok(read_game_options(&text)),
+    })
+}
+
+/// The game server the client will connect to: `[config] host` and `port` as GetPrivateProfileStringA reads
+/// them, as "host:port" (or just the host when there is no port). None when the file, or the host, is missing
+/// or unreadable. Display only: it shows which server a channel's folder plays, and never blocks Play.
+pub fn read_game_server(install_dir: &str) -> Option<String> {
+    if install_dir.is_empty() {
+        return None;
+    }
+    let text = read_text(Path::new(install_dir)).ok()??;
+    let ini = parse_ini(&text);
+    let clean = |v: Vec<u8>| latin1_decode(&v).trim().to_string();
+    let host = get_profile_value(&ini, "config", "host").map(clean).filter(|h| !h.is_empty())?;
+    Some(match get_profile_value(&ini, "config", "port").map(clean).filter(|p| !p.is_empty()) {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
     })
 }
 
@@ -230,6 +247,17 @@ mod tests {
 
     fn changes(list: &[(&str, bool)]) -> BTreeMap<String, bool> {
         list.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn the_game_server_is_read_the_way_the_client_reads_it() {
+        assert_eq!(read_game_server(Folder::new(Some(real().as_bytes())).s()).as_deref(), Some("203.0.113.7:8484"));
+        let live = "[config]\r\nhost = slumsms.asslorde.com ; live\r\nport=8485\r\nhost=ignored\r\n";
+        assert_eq!(read_game_server(Folder::new(Some(live.as_bytes())).s()).as_deref(), Some("slumsms.asslorde.com ; live:8485"), "no inline comments, like the client");
+        assert_eq!(read_game_server(Folder::new(Some(b"[config]\nhost=\"192.168.0.164\"\n")).s()).as_deref(), Some("192.168.0.164"));
+        assert_eq!(read_game_server(Folder::new(Some(b"[general]\nresolution=5\n")).s()), None);
+        assert_eq!(read_game_server(Folder::new(None).s()), None);
+        assert_eq!(read_game_server(""), None);
     }
 
     #[test]

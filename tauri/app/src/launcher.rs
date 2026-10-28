@@ -11,7 +11,7 @@ use slums_core::channels::{accessible_channels, change_folder, channel_feed, cha
 use slums_core::client_build::read_client_build;
 use slums_core::config::{builtin_access_key, detect_bundled_client, clean_access_key, effective_access_key, read_launcher_config, standalone_install_dir, valid_access_key, validate_feed_url, LauncherConfig};
 use slums_core::error::{ACCESS_KEY_REQUIRED, CONFIG_MISSING, GAME_RUNNING};
-use slums_core::game_config::{game_running, read_game_config, write_game_config};
+use slums_core::game_config::{game_running, read_game_config, read_game_server, write_game_config};
 use slums_core::game_options::{default_values, validate_changes};
 use slums_core::http::{FeedAccess, ACCESS_KEY_USER, PASS_HEADER};
 use slums_core::install::{inspect_release, install_release, InspectResult, InstallOptions, Mode, Progress, ProgressFn};
@@ -527,6 +527,10 @@ impl Launcher {
         // back to the client layer version, and it never blocks Play.
         if let Some(build) = read_client_build(&dir) {
             installed["clientBuild"] = json!(build);
+        }
+        // config.ini [config] host:port: which game server this channel's folder plays (Test mirrors Live).
+        if let Some(server) = read_game_server(&dir) {
+            installed["server"] = json!(server);
         }
         self.send(json!({ "installed": installed }));
     }

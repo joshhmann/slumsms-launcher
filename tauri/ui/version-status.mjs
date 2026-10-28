@@ -7,7 +7,7 @@
  *               record's `client` layer version.
  *   Launcher  - this app's own version.
  *
- * installed: { status: 'installed', version, layers, clientBuild? } | { status: 'unknown', clientBuild? } | { status: 'not-installed' }
+ * installed: { status: 'installed', version, layers, clientBuild?, server? } | { status: 'unknown', clientBuild?, server? } | { status: 'not-installed' }
  *   'unknown' is an existing client the launcher has not verified since it started recording versions.
  *   clientBuild is { release: '1.6.0', build: 10600 } from slums-build.txt beside slums.dll.
  * available: { status: 'ok', version, layers, minClientBuild? } | { status: 'checking' } | { status: 'access-key' | 'offline' | 'error' }

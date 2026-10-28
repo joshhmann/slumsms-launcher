@@ -3,7 +3,7 @@ import { GAME_OPTIONS } from './game-options.mjs';
 
 const elements = Object.fromEntries([
   'phase-badge', 'phase-label', 'status-eyebrow', 'status-heading', 'status-message',
-  'install-target', 'install-target-path', 'change-folder-inline', 'release-detail', 'installed-version', 'available-version', 'client-version', 'launcher-version', 'release-note',
+  'install-target', 'install-target-path', 'change-folder-inline', 'release-detail', 'installed-version', 'available-version', 'client-version', 'launcher-version', 'release-note', 'game-server-row', 'game-server',
   'news', 'news-list', 'progress-area', 'progress-label', 'progress-detail', 'operation-progress',
   'action-help', 'play', 'play-label', 'error-message', 'open-settings', 'settings-dialog',
   'close-settings', 'install-dir', 'folder-source', 'choose-folder', 'open-folder', 'repair-files',
@@ -346,6 +346,9 @@ function renderVersions() {
   elements['client-version'].dataset.known = String(status.clientKnown);
   elements['client-version'].dataset.outdated = String(Boolean(status.clientNote));
   elements['launcher-version'].textContent = launcherLabel(configuration.appVersion);
+  const server = state.installed?.status !== 'not-installed' && typeof state.installed?.server === 'string' ? state.installed.server : '';
+  elements['game-server-row'].hidden = !server;
+  elements['game-server'].textContent = server;
   elements['release-note'].textContent = note;
   elements['release-note'].title = status.clientNote ? `${status.clientNote}.` : '';
   elements['release-note'].hidden = !note;
