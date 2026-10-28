@@ -41,6 +41,10 @@ export const GAME_OPTIONS = Object.freeze([
     label: 'Shoot in mid-air', description: 'Lets bow, crossbow, claw and gun attacks fire while you are jumping.' },
   { id: 'jumpmagic', section: 'clienthax', key: 'jumpmagic', fallback: true, group: 'Movement',
     label: 'Cast magic in mid-air', description: 'Lets magic attacks be cast while you are jumping.' },
+  { id: 'borderless', section: 'graphics', key: 'borderless', fallback: false, group: 'Window', reader: 'profile',
+    label: 'Borderless window', description: 'No window frame, centred on your screen. At your screen\'s resolution it looks like fullscreen, and alt-tab is instant. Needs game client 1.6.1 or newer.' },
+  { id: 'dpiaware', section: 'graphics', key: 'dpiaware', fallback: false, group: 'Window', reader: 'profile',
+    label: 'Sharp on scaled displays', description: 'Stops Windows blurring the game when display scaling is set to 125% or more. Needs game client 1.6.1 or newer.' },
 ].map((option) => Object.freeze(option)));
 
 /** MapleRoot's single switch for all three movement keys; read for older files, never written. */

@@ -66,7 +66,7 @@ const fn profile(option: GameOption) -> GameOption {
 
 /// What the client does with each key, in player words. `fallback` is the client's value when the
 /// key is absent (pinned to the client source by `fallbacks_match_the_client` below).
-pub const GAME_OPTIONS: [GameOption; 10] = [
+pub const GAME_OPTIONS: [GameOption; 12] = [
     option("discord", "discord", "enableactivitystatus", true, "General", None,
         "Show your game on Discord", "Shows your character's name, level and job as your Discord status while you play."),
     option("winkey", "clienthax", "enablewinkey", true, "General", None,
@@ -87,6 +87,10 @@ pub const GAME_OPTIONS: [GameOption; 10] = [
         "Shoot in mid-air", "Lets bow, crossbow, claw and gun attacks fire while you are jumping."),
     option("jumpmagic", "clienthax", "jumpmagic", true, "Movement", None,
         "Cast magic in mid-air", "Lets magic attacks be cast while you are jumping."),
+    profile(option("borderless", "graphics", "borderless", false, "Window", None,
+        "Borderless window", "No window frame, centred on your screen. At your screen's resolution it looks like fullscreen, and alt-tab is instant. Needs game client 1.6.1 or newer.")),
+    profile(option("dpiaware", "graphics", "dpiaware", false, "Window", None,
+        "Sharp on scaled displays", "Stops Windows blurring the game when display scaling is set to 125% or more. Needs game client 1.6.1 or newer.")),
 ];
 
 /// MapleRoot's single switch for all three movement keys; read for older files, never written.
@@ -699,7 +703,7 @@ mod tests {
     /// Change this table only together with the client.
     #[test]
     fn fallbacks_match_the_client() {
-        let client: [(&str, &str, &str, bool, Reader); 10] = [
+        let client: [(&str, &str, &str, bool, Reader); 12] = [
             ("discord", "discord", "enableactivitystatus", true, Reader::Inih), // YourStuff.h
             ("winkey", "clienthax", "enablewinkey", true, Reader::Inih),        // YourStuff.h
             ("nobulb", "clienthax", "nobulb", true, Reader::Inih),              // YourStuff.h
@@ -710,6 +714,8 @@ mod tests {
             ("doubletapjump", "clienthax", "doubletapjump", false, Reader::Profile), // bounce.cpp
             ("jumpshoot", "clienthax", "jumpshoot", true, Reader::Inih),        // YourStuff.h
             ("jumpmagic", "clienthax", "jumpmagic", true, Reader::Inih),        // YourStuff.h
+            ("borderless", "graphics", "borderless", false, Reader::Profile),  // window_policy.h IniTrue (1.6.1-rc2+)
+            ("dpiaware", "graphics", "dpiaware", false, Reader::Profile),      // window_policy.h IniTrue (1.6.1-rc2+)
         ];
         assert_eq!(GAME_OPTIONS.len(), client.len());
         for (id, section, key, fallback, reader) in client {
@@ -717,6 +723,20 @@ mod tests {
             assert_eq!((option.section, option.key, option.fallback, option.reader), (section, key, fallback, reader), "{id}");
             assert_eq!(values("")[id], fallback, "{id} with an empty config.ini");
         }
+    }
+
+    #[test]
+    fn window_switches_join_an_existing_graphics_section() {
+        let text = b"[config]\r\nhost=x\r\n[graphics]\r\nd3d9host=1\r\nadapterfallback=0\r\n[debug]\r\nattackdiag=1\r\n";
+        let after = String::from_utf8(apply_game_options(text, &[("borderless", true), ("dpiaware", false)]).unwrap()).unwrap();
+        assert_eq!(after.matches("[graphics]").count(), 1, "{after}");
+        assert!(after.contains("[graphics]\r\nd3d9host=1\r\nadapterfallback=0\r\n"), "{after}");
+        let graphics = &after[after.find("[graphics]").unwrap()..after.find("[debug]").unwrap()];
+        assert!(graphics.contains("borderless=true") && graphics.contains("dpiaware=false"), "{after}");
+        assert!(after.ends_with("[debug]\r\nattackdiag=1\r\n"), "{after}");
+        assert_eq!(values("[graphics]\nborderless=on\ndpiaware=1\n")["borderless"], true);
+        assert_eq!(values("[graphics]\nborderless=on\ndpiaware=1\n")["dpiaware"], true);
+        assert_eq!(values("")["borderless"], false);
     }
 
     /// The page's copy (ui/game-options.mjs) must carry the same fallbacks and readers.

@@ -143,6 +143,8 @@ const CLIENT_DEFAULTS = [
   ['doubletapjump', 'clienthax', 'doubletapjump', false, 'profile'], // bounce.cpp
   ['jumpshoot', 'clienthax', 'jumpshoot', true, undefined],        // YourStuff.h
   ['jumpmagic', 'clienthax', 'jumpmagic', true, undefined],        // YourStuff.h
+  ['borderless', 'graphics', 'borderless', false, 'profile'],     // window_policy.h IniTrue (1.6.1-rc2+)
+  ['dpiaware', 'graphics', 'dpiaware', false, 'profile'],         // window_policy.h IniTrue (1.6.1-rc2+)
 ];
 
 test('every fallback matches the client default', async () => {
