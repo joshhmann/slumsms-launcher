@@ -177,11 +177,12 @@ impl Launcher {
         };
         let settings_file = data_dir.join("settings.json");
         let log_file = data_dir.join("launcher.log");
-        // The Electron launcher's per-user folder (Electron userData = %APPDATA%\mapleroot-launcher).
-        let legacy_file = match (&args.legacy_dir, &args.self_test) {
-            (Some(dir), _) => Some(dir.join("settings.json")),
-            (None, Some(_)) => None,
-            (None, None) => app.path().config_dir().ok().map(|d| d.join("mapleroot-launcher").join("settings.json")),
+        // The Electron launcher's per-user folder (Electron userData = %APPDATA%\mapleroot-launcher). A launcher
+        // started with its own --data-dir (a test copy) imports nothing unless --legacy-dir names a folder.
+        let legacy_file = match (&args.legacy_dir, &args.self_test, &args.data_dir) {
+            (Some(dir), _, _) => Some(dir.join("settings.json")),
+            (None, Some(_), _) | (None, None, Some(_)) => None,
+            (None, None, None) => app.path().config_dir().ok().map(|d| d.join("mapleroot-launcher").join("settings.json")),
         };
         // Built-in defaults ship in the exe; an optional launcher.config.json beside it overrides them.
         let mut sources = vec![("built-in launcher.config.json".to_string(), Some(BUILTIN_CONFIG.to_string()))];

@@ -66,8 +66,9 @@ toolchain's own `bin` first on `PATH`. It also runs a copy of `cargo-tauri.exe` 
 
 The self-test window stays hidden. The run writes start-up times, the first check, each step's
 result and the settings to `report.json`, then exits. The report shows only whether a key is
-saved, never the key. `--data-dir` keeps the self-test away from the real settings, and
-`--legacy-dir=DIR` feeds it fake Electron settings. Step `account-store` saves, reads back and
+saved, never the key. `--data-dir` keeps the self-test away from the real settings and, unless
+`--legacy-dir=DIR` feeds it fake Electron settings, imports no Electron settings at all. `--install-dir` sets the
+folder of the saved channel (Live for a new `--data-dir`); it doesn't change the channel. Step `account-store` saves, reads back and
 deletes a made-up website session in `--data-dir` (it shows DPAPI works for this user); step `account` reports the
 sign-in state for the current site.
 
