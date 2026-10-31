@@ -350,8 +350,12 @@ async fn availability_reads_only_the_top_manifest_and_never_fails() {
     assert_eq!(check_available_release(&server.url("missing.json"), Some(&a), AVAILABLE_TIMEOUT).await.status(), "error");
     server.put("bad.json", b"{not json".to_vec());
     assert_eq!(check_available_release(&server.url("bad.json"), Some(&a), AVAILABLE_TIMEOUT).await.status(), "error");
-    let closed = format!("http://127.0.0.1:{}/manifest.json", { let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); l.local_addr().unwrap().port() });
+    // A port held bound but never listening refuses connections, and no parallel test can take it meanwhile.
+    let held = tokio::net::TcpSocket::new_v4().unwrap();
+    held.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let closed = format!("http://127.0.0.1:{}/manifest.json", held.local_addr().unwrap().port());
     assert_eq!(check_available_release(&closed, None, AVAILABLE_TIMEOUT).await.status(), "offline");
+    drop(held);
     server.hook(|_, _| Action::StallAfter(0));
     assert_eq!(check_available_release(&server.url("manifest.json"), Some(&a), Duration::from_millis(300)).await.status(), "offline");
 }

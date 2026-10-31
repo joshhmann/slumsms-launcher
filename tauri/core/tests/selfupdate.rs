@@ -18,9 +18,21 @@ fn scratch(label: &str) -> PathBuf {
 fn running_launcher(dir: &Path) -> (PathBuf, Child) {
     let exe = dir.join(if cfg!(windows) { "SlumsMS Launcher.exe" } else { "SlumsMS Launcher" });
     std::fs::copy(FAKE, &exe).unwrap();
-    let child = Command::new(&exe).spawn().unwrap();
+    let child = spawn_fresh(&exe);
     std::thread::sleep(Duration::from_millis(300));
     (exe, child)
+}
+
+/// Starts an exe that was just written. On Linux a parallel test's fork can still hold the copy's
+/// write handle for a moment ("Text file busy"), so that error is retried briefly.
+fn spawn_fresh(exe: &Path) -> Child {
+    for _ in 0..50 {
+        match Command::new(exe).spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => std::thread::sleep(Duration::from_millis(20)),
+            other => return other.unwrap(),
+        }
+    }
+    Command::new(exe).spawn().unwrap()
 }
 
 fn new_build() -> Vec<u8> {
