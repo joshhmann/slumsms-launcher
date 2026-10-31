@@ -204,8 +204,7 @@ impl Launcher {
             settings.feed_url = feed.clone();
         }
         if let Some(dir) = &args.install_dir {
-            settings.folders.live = dir.clone();
-            settings.channel = Channel::Live;
+            settings.folders.set(settings.channel, dir.clone());
         }
         let mut state = Map::new();
         state.insert("phase".into(), json!(if config_error.is_some() { "error" } else { "idle" }));
@@ -474,8 +473,7 @@ impl Launcher {
             settings.feed_url = feed.clone();
         }
         if let Some(dir) = &self.args.install_dir {
-            settings.folders.live = dir.clone();
-            settings.channel = Channel::Live;
+            settings.folders.set(settings.channel, dir.clone());
         }
         let mut inner = self.inner.lock().unwrap();
         inner.settings = settings;
