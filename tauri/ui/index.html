@@ -4,13 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <!-- The Content-Security-Policy is set by Tauri (tauri.conf.json app.security.csp) so the IPC channel is allowed. -->
-    <meta name="color-scheme" content="dark">
+    <meta name="color-scheme" content="light dark">
     <title>SlumsMS Launcher</title>
     <link rel="stylesheet" href="./style.css">
     <script src="./bridge.js"></script>
     <script type="module" src="./renderer.mjs"></script>
     <script type="module" src="./mascot.mjs"></script>
     <script type="module" src="./account.mjs"></script>
+    <script type="module" src="./stickers.mjs"></script>
   </head>
   <body>
     <header class="scene">
@@ -19,20 +20,28 @@
       </div>
       <div class="scene-rotor" aria-hidden="true">
         <img class="pic-heart" src="./assets/cut-heart-640.webp" srcset="./assets/cut-heart-640.webp 640w, ./assets/cut-heart-960.webp 960w" sizes="400px" alt="" draggable="false">
-        <img class="pic-peace-wink" src="./assets/bubble-peace-wink-640.webp" srcset="./assets/bubble-peace-wink-640.webp 640w, ./assets/bubble-peace-wink-960.webp 960w" sizes="400px" alt="" draggable="false">
-        <img class="pic-peace" src="./assets/cut-peace-640.webp" srcset="./assets/cut-peace-640.webp 640w, ./assets/cut-peace-960.webp 960w" sizes="400px" alt="" draggable="false">
-        <img class="pic-chin-hands" src="./assets/bubble-chin-hands-640.webp" srcset="./assets/bubble-chin-hands-640.webp 640w, ./assets/bubble-chin-hands-960.webp 960w" sizes="400px" alt="" draggable="false">
-        <img class="pic-crossed" src="./assets/cut-crossed-640.webp" srcset="./assets/cut-crossed-640.webp 640w, ./assets/cut-crossed-960.webp 960w" sizes="400px" alt="" draggable="false">
-        <img class="pic-point-wink" src="./assets/bubble-point-wink-640.webp" srcset="./assets/bubble-point-wink-640.webp 640w, ./assets/bubble-point-wink-960.webp 960w" sizes="400px" alt="" draggable="false">
-        <img class="pic-point" src="./assets/cut-point-640.webp" srcset="./assets/cut-point-640.webp 640w, ./assets/cut-point-960.webp 960w" sizes="400px" alt="" draggable="false">
-        <img class="pic-reach-wink" src="./assets/bubble-reach-wink-640.webp" srcset="./assets/bubble-reach-wink-640.webp 640w, ./assets/bubble-reach-wink-960.webp 960w" sizes="400px" alt="" draggable="false">
-        <img class="pic-cozy" src="./assets/cut-cozy-640.webp" srcset="./assets/cut-cozy-640.webp 640w, ./assets/cut-cozy-960.webp 960w" sizes="400px" alt="" draggable="false">
-        <img class="pic-chin-heart" src="./assets/bubble-chin-heart-640.webp" srcset="./assets/bubble-chin-heart-640.webp 640w, ./assets/bubble-chin-heart-960.webp 960w" sizes="400px" alt="" draggable="false">
+        <img class="pic-peace-wink" src="./assets/bubble-peace-wink-640.webp" srcset="./assets/bubble-peace-wink-640.webp 640w, ./assets/bubble-peace-wink-960.webp 960w" sizes="400px" alt="" draggable="false" loading="lazy">
+        <img class="pic-chin-hands" src="./assets/bubble-chin-hands-640.webp" srcset="./assets/bubble-chin-hands-640.webp 640w, ./assets/bubble-chin-hands-960.webp 960w" sizes="400px" alt="" draggable="false" loading="lazy">
+        <img class="pic-point-wink" src="./assets/bubble-point-wink-640.webp" srcset="./assets/bubble-point-wink-640.webp 640w, ./assets/bubble-point-wink-960.webp 960w" sizes="400px" alt="" draggable="false" loading="lazy">
+        <img class="pic-reach-wink" src="./assets/bubble-reach-wink-640.webp" srcset="./assets/bubble-reach-wink-640.webp 640w, ./assets/bubble-reach-wink-960.webp 960w" sizes="400px" alt="" draggable="false" loading="lazy">
+        <img class="pic-chin-heart" src="./assets/bubble-chin-heart-640.webp" srcset="./assets/bubble-chin-heart-640.webp 640w, ./assets/bubble-chin-heart-960.webp 960w" sizes="400px" alt="" draggable="false" loading="lazy">
+        <img class="pic-season-newyear" src="./assets/season-newyear-640.webp" alt="" draggable="false" loading="lazy">
+        <img class="pic-season-cocoa" src="./assets/season-cocoa-640.webp" alt="" draggable="false" loading="lazy">
+        <img class="pic-season-hearts" src="./assets/season-hearts-640.webp" alt="" draggable="false" loading="lazy">
+        <img class="pic-season-blossom" src="./assets/season-blossom-640.webp" alt="" draggable="false" loading="lazy">
+        <img class="pic-season-umbrella" src="./assets/season-umbrella-640.webp" alt="" draggable="false" loading="lazy">
+        <img class="pic-season-reading" src="./assets/season-reading-640.webp" alt="" draggable="false" loading="lazy">
+        <img class="pic-season-sunflower" src="./assets/season-sunflower-640.webp" alt="" draggable="false" loading="lazy">
+        <img class="pic-season-picnic" src="./assets/season-picnic-640.webp" alt="" draggable="false" loading="lazy">
+        <img class="pic-season-notepad" src="./assets/season-notepad-640.webp" alt="" draggable="false" loading="lazy">
+        <img class="pic-season-autumn" src="./assets/season-autumn-640.webp" alt="" draggable="false" loading="lazy">
+        <img class="pic-season-shopping" src="./assets/season-shopping-640.webp" alt="" draggable="false" loading="lazy">
+        <img class="pic-season-present" src="./assets/season-present-640.webp" alt="" draggable="false" loading="lazy">
       </div>
       <div class="masthead">
         <div class="brand">
-          <img class="brand-leaf" src="./assets/emblem.webp" alt="" aria-hidden="true" draggable="false">
-          <div><p class="brand-name">SlumsMS</p><p class="brand-caption">GAME LAUNCHER</p></div>
+          <img class="brand-mark" src="./assets/wordmark.webp" srcset="./assets/wordmark.webp 1x, ./assets/wordmark-2x.webp 2x" alt="SlumsMS" width="173" height="56" draggable="false">
+          <p class="brand-caption">Launcher</p>
         </div>
         <div class="masthead-actions">
           <span class="phase-badge" id="phase-badge" data-phase="idle"><span class="status-dot" aria-hidden="true"></span><span id="phase-label">Starting</span></span>
@@ -41,17 +50,19 @@
           <button class="icon-button" id="open-settings" type="button" aria-haspopup="dialog" aria-controls="settings-dialog" title="Settings"><span class="gear" aria-hidden="true"></span><span class="sr-only">Settings</span></button>
         </div>
       </div>
+      <div class="rail" id="rail" aria-label="Megaphone" hidden><b>Megaphone</b><div class="roll"><div id="rail-roll"></div></div></div>
     </header>
 
     <div class="launcher">
       <main>
         <section class="news window" id="news" aria-labelledby="news-heading" hidden>
-          <h2 class="window-tab" id="news-heading">LATEST UPDATES</h2>
+          <h2 class="window-tab" id="news-heading">Latest updates</h2>
           <ol class="news-list" id="news-list"></ol>
         </section>
 
         <section class="client-card window" aria-labelledby="status-heading">
-          <p class="window-tab" aria-hidden="true">STATUS</p>
+          <p class="window-tab" aria-hidden="true">Status</p>
+          <figure class="sticker"><img id="status-sticker" src="./assets/stickers/chibi-cool-360.webp" alt="" width="360" height="314" draggable="false"><figcaption class="sticker-note" id="sticker-note" hidden></figcaption></figure>
           <div class="client-copy">
             <p class="eyebrow" id="status-eyebrow">YOUR NEXT ADVENTURE</p>
             <h1 id="status-heading">Make yourself at home.</h1>
@@ -89,7 +100,7 @@
 
     <dialog class="settings-dialog" id="settings-dialog" aria-labelledby="settings-heading">
       <div class="dialog-head">
-        <h2 id="settings-heading">SETTINGS</h2>
+        <h2 id="settings-heading">Settings</h2>
         <button class="icon-button icon-button-small" id="close-settings" type="button" title="Close"><span aria-hidden="true">✕</span><span class="sr-only">Close settings</span></button>
       </div>
       <div class="dialog-body">
@@ -139,7 +150,7 @@
 
     <dialog class="settings-dialog account-dialog" id="account-dialog" aria-labelledby="account-heading">
       <div class="dialog-head">
-        <h2 id="account-heading">SIGN IN</h2>
+        <h2 id="account-heading">Sign in</h2>
         <button class="icon-button icon-button-small" id="close-account" type="button" title="Close"><span aria-hidden="true">✕</span><span class="sr-only">Close sign in</span></button>
       </div>
       <div class="dialog-body">
@@ -162,7 +173,7 @@
 
     <dialog class="settings-dialog question-dialog" id="question-dialog" aria-labelledby="question-heading">
       <div class="dialog-head">
-        <h2 id="question-heading">YOUR GAME FOLDER</h2>
+        <h2 id="question-heading">Your game folder</h2>
       </div>
       <div class="dialog-body">
         <p class="question-text" id="question-text"></p>
@@ -177,7 +188,7 @@
 
     <dialog class="settings-dialog options-dialog" id="options-dialog" aria-labelledby="options-heading">
       <div class="dialog-head">
-        <h2 id="options-heading">GAME OPTIONS</h2>
+        <h2 id="options-heading">Game options</h2>
         <button class="icon-button icon-button-small" id="close-options" type="button" title="Close"><span aria-hidden="true">✕</span><span class="sr-only">Close game options</span></button>
       </div>
       <div class="dialog-body">

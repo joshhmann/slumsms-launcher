@@ -17,12 +17,12 @@
         "minWidth": 860,
         "minHeight": 700,
         "center": true,
-        "backgroundColor": "#16203a",
+        "backgroundColor": "#0d0e12",
         "visible": false
       }
     ],
     "security": {
-      "csp": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'",
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'",
       "freezePrototype": true
     }
   },

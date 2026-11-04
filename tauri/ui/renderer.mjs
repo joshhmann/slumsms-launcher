@@ -273,6 +273,23 @@ function renderNews() {
     return item;
   }));
   elements.news.hidden = news.length === 0;
+  renderRail(news);
+}
+
+/** The Megaphone rail under the banner, as on the website: the news titles scrolling by, the set twice so the loop
+ *  joins up (the second copy is hidden from screen readers). */
+function renderRail(news) {
+  const rail = document.getElementById('rail');
+  const roll = document.getElementById('rail-roll');
+  if (!rail || !roll) return;
+  const titled = news.filter((entry) => typeof entry?.title === 'string' && entry.title);
+  roll.replaceChildren(...[0, 1].flatMap((copy) => titled.map((entry) => {
+    const span = document.createElement('span');
+    span.textContent = entry.title;
+    if (copy) span.setAttribute('aria-hidden', 'true');
+    return span;
+  })));
+  rail.hidden = titled.length === 0;
 }
 
 /** A first install that stopped part-way: some verified files are already in the folder. */
