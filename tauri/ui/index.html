@@ -12,6 +12,7 @@
     <script type="module" src="./mascot.mjs"></script>
     <script type="module" src="./account.mjs"></script>
     <script type="module" src="./stickers.mjs"></script>
+    <script type="module" src="./runner.mjs"></script>
   </head>
   <body>
     <header class="scene">
@@ -72,7 +73,10 @@
           <div class="action-status" role="group" aria-label="Client actions">
             <div class="progress-area" id="progress-area" hidden>
               <div class="progress-caption"><span id="progress-label">Working…</span><span id="progress-detail"></span></div>
-              <progress id="operation-progress" max="1" aria-labelledby="progress-label"></progress>
+              <div class="track" data-mode="pace">
+                <progress id="operation-progress" max="1" aria-labelledby="progress-label"></progress>
+                <span class="runner" id="progress-runner" aria-hidden="true"><img class="run-a" src="./assets/stickers/runner-run-a.webp" alt="" width="112" height="128" draggable="false"><img class="run-b" src="./assets/stickers/runner-run-b.webp" alt="" width="112" height="128" draggable="false"><img class="stand" src="./assets/stickers/runner-stand.webp" alt="" width="112" height="128" draggable="false"></span>
+              </div>
             </div>
             <p class="action-help" id="action-help">Starting…</p>
           </div>

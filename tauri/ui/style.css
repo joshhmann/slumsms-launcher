@@ -206,6 +206,25 @@ progress { display: block; width: 100%; height: 14px; padding: 0; border: var(--
 progress::-webkit-progress-bar { background: var(--track); }
 progress::-webkit-progress-value { background: repeating-linear-gradient(-45deg, var(--accent) 0 10px, var(--bar-a) 10px 20px); transition: width 150ms ease; }
 progress:indeterminate { opacity: .7; }
+/* runner.mjs: little Slums-chan (the owner's pixel sheet) runs along the bar. --at is the work done, 0 to 1; the two
+   side frames swap in steps; full bar, she stands and faces you; no value yet, she paces back and forth. */
+.track { position: relative; --at: 0; --w: 40px; margin-top: 44px; }
+.runner { position: absolute; bottom: 6px; left: calc(var(--at) * (100% - var(--w))); width: var(--w); height: 46px; pointer-events: none;
+  transition: left .4s linear; }
+.runner img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; object-position: center bottom;
+  filter: drop-shadow(2px 2px 0 var(--drop)); }
+.runner .run-b, .runner .stand { visibility: hidden; }
+.track[data-mode="run"] .runner, .track[data-mode="pace"] .runner { animation: hop .32s steps(2) infinite; }
+.track[data-mode="run"] .run-a, .track[data-mode="pace"] .run-a,
+.track[data-mode="run"] .run-b, .track[data-mode="pace"] .run-b { animation: frame .32s steps(1) infinite; }
+.track[data-mode="run"] .run-b, .track[data-mode="pace"] .run-b { animation-delay: -.16s; }
+.track[data-mode="pace"] .runner { left: 0; animation: hop .32s steps(2) infinite, pace 5s linear infinite; }
+.track[data-mode="done"] .run-a, .track[data-mode="done"] .run-b { visibility: hidden; }
+.track[data-mode="done"] .stand { visibility: visible; }
+@keyframes frame { 0% { visibility: visible; } 50% { visibility: hidden; } }
+@keyframes hop { 0% { translate: 0 0; } 50% { translate: 0 -3px; } }
+@keyframes pace { 0% { left: 0; scale: 1 1; } 49.9% { left: calc(100% - var(--w)); scale: 1 1; } 50% { left: calc(100% - var(--w)); scale: -1 1; }
+  100% { left: 0; scale: -1 1; } }
 
 /* ── dialogs ─────────────────────────────────────────────────────────────────────────────────────────────────────── */
 .settings-dialog { width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 0; border: var(--border) solid var(--edge);
@@ -281,6 +300,8 @@ footer { display: flex; align-items: baseline; gap: 8px; margin-top: 16px; paddi
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
+  .track[data-mode="run"] .run-a, .track[data-mode="pace"] .run-a { visibility: visible; }
+  .track[data-mode="run"] .run-b, .track[data-mode="pace"] .run-b { visibility: hidden; }
   .scene-video { display: none; }
 }
 

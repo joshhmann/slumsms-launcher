@@ -146,3 +146,20 @@ test('with reduced motion the banner keeps one picture per launch', async () => 
   assert.equal(page.timers.size, 0);
   assert.equal(page.listeners.size, 0);
 });
+
+test('little Slums-chan runs to the work done, stands when the bar is full and paces when there is no size yet', async () => {
+  const { runnerFor } = await import('../tauri/ui/runner.mjs');
+  assert.deepEqual(runnerFor('0.37', '1'), { at: 0.37, mode: 'run' });
+  assert.deepEqual(runnerFor('50', '200'), { at: 0.25, mode: 'run' });
+  assert.deepEqual(runnerFor('1', '1'), { at: 1, mode: 'done' });
+  assert.deepEqual(runnerFor('3', '1'), { at: 1, mode: 'done' });     // never past the end
+  assert.deepEqual(runnerFor('-1', '1'), { at: 0, mode: 'run' });
+  assert.deepEqual(runnerFor(null, '1'), { at: 0, mode: 'pace' });    // an indeterminate bar
+  assert.deepEqual(runnerFor('0.5', '0'), { at: 0, mode: 'pace' });
+  const { readFileSync, existsSync } = await import('node:fs');
+  const html = readFileSync(new URL('../tauri/ui/index.html', import.meta.url), 'utf8');
+  assert.match(html, /<div class="track"[^>]*>\s*<progress id="operation-progress"/);
+  for (const f of ['run-a', 'run-b', 'stand']) {
+    assert.ok(existsSync(new URL(`../tauri/ui/assets/stickers/runner-${f}.webp`, import.meta.url)), f);
+  }
+});
