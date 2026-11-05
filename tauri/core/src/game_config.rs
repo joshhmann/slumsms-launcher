@@ -1,9 +1,10 @@
 //! config.ini on disk for the Game options panel (port of game-config.mjs). The file is the
-//! player's (publish marks it player-owned; updates never replace it) and it holds the server
-//! address, so this module never creates it: a missing file is left to the install flow.
+//! player's (publish marks it player-owned; updates never replace it), except its server address,
+//! which follows the channel (merge_server, used by the install flow). This module never creates
+//! it: a missing file is left to the install flow.
 
 use crate::error::{Error, Result, CONFIG_MISSING, GAME_RUNNING};
-use crate::game_options::{explicit_game_options, get_profile_value, latin1_decode, parse_ini, read_game_options, validate_changes, GameOptions};
+use crate::game_options::{explicit_game_options, get_profile_value, latin1_decode, parse_ini, read_game_options, serialize_ini, set_profile_value, validate_changes, GameOptions};
 use serde::ser::{Serialize, SerializeStruct, Serializer};
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -99,6 +100,27 @@ pub fn read_game_server(install_dir: &str) -> Option<String> {
         Some(port) => format!("{host}:{port}"),
         None => host,
     })
+}
+
+/// The keys of config.ini that say which game server the client joins. They belong to the channel,
+/// not the player: each channel's client layer ships its own (Live slumsms.asslorde.com:8485, RC and
+/// Test the test server), and slums.dll reads the server only from here (client src/injector.cpp).
+pub const SERVER_KEYS: [&str; 2] = ["host", "port"];
+
+/// The player's config.ini with `[config] host` and `port` taken from the channel layer's copy and
+/// everything else (game options, their own keys, comments, line endings) left as it was. A key the
+/// layer doesn't set stays as the player has it. Before this (launcher 1.6.4 and older) an existing
+/// config.ini was never touched, so an install kept the server of whichever channel it was first
+/// installed from: RC after Live still joined Live (owner, 2026-11-05).
+pub fn merge_server(player: &[u8], layer: &[u8]) -> Vec<u8> {
+    let channel = parse_ini(layer);
+    let mut ini = parse_ini(player);
+    for key in SERVER_KEYS {
+        if let Some(value) = get_profile_value(&channel, "config", key) {
+            set_profile_value(&mut ini, "config", key, &value);
+        }
+    }
+    serialize_ini(&ini)
 }
 
 fn failure(message: impl Into<String>, code: &'static str) -> Error {
@@ -208,6 +230,23 @@ mod tests {
     use super::*;
     use crate::channels::{channel_install_dir, Channel, Folders, CHANNELS};
     use crate::game_options::{explicit_game_options, GAME_OPTIONS};
+
+    #[test]
+    fn merge_server_takes_only_host_and_port_from_the_channel() {
+        let rc = b"[general]\r\nresolution=1\r\n[config]\r\nhost=192.168.0.111\r\nport=8489\r\n[debug]\r\nattackdiag=0\r\n";
+        let player = real();
+        let merged = String::from_utf8(merge_server(player.as_bytes(), rc)).unwrap();
+        assert_eq!(merged, player.replace("host=203.0.113.7\r\nport=8484", "host=192.168.0.111\r\nport=8489"), "nothing else changes");
+        assert_eq!(merge_server(merged.as_bytes(), rc), merged.as_bytes(), "already right: byte-for-byte");
+        // Quotes, spacing and inline comments as GetPrivateProfileString reads them; a missing key is added.
+        let odd = b"[Config]\nHost = \"slumsms.asslorde.com\" ; live\n[clienthax]\nnobulb=true\n";
+        let out = String::from_utf8(merge_server(odd, rc)).unwrap();
+        assert_eq!(out, "[Config]\nHost = 192.168.0.111\nport=8489\n[clienthax]\nnobulb=true\n");
+        // A layer without a server leaves the player's file alone; one with no [config] at all gets one.
+        assert_eq!(merge_server(player.as_bytes(), b"[general]\r\n"), player.as_bytes());
+        let none = String::from_utf8(merge_server(b"[general]\r\nresolution=5\r\n", rc)).unwrap();
+        assert_eq!(none, "[general]\r\nresolution=5\r\n\r\n[config]\r\nhost=192.168.0.111\r\nport=8489\r\n");
+    }
 
     fn real() -> String {
         [

@@ -5,6 +5,7 @@
 //! stall detection, a disk-space check and resumable first installs.
 
 use crate::error::{Error, Result, ACCESS_KEY_REQUIRED, DISK_FULL};
+use crate::game_config::{merge_server, CONFIG_FILE};
 use crate::fsutil::{destination, digest, free_disk_bytes, installation_root, lstat_or_missing, mtime_ms, note_created, DirCache};
 use crate::http::{network_url, parse_json, read_bytes, request, FeedAccess};
 use crate::manifest::{windows_key, FileEntry, STAGE_PREFIX};
@@ -60,6 +61,11 @@ pub enum Mode {
     Full,
 }
 
+/// config.ini at the top of the game folder (player-owned, but its server follows the channel).
+fn is_server_file(path: &str) -> bool {
+    windows_key(path) == windows_key(CONFIG_FILE)
+}
+
 struct Inspection {
     files: Vec<FileEntry>,
     bytes: u64,
@@ -100,7 +106,17 @@ fn inspect(root: &str, release: &Release, on_progress: &ProgressFn, mode: Mode, 
             Some(meta) => {
                 existing.insert(file.path.clone());
                 if owned.contains(&windows_key(&file.path)) {
-                    // the player's copy is kept as-is
+                    // The player's copy is kept, except that config.ini takes its server from the channel
+                    // (merge_server) whenever the layer's copy is not the one it last took it from.
+                    match entry.filter(|e| e.sha256 == file.sha256) {
+                        Some(entry) => {
+                            verified.insert(file.path.clone(), entry.clone());
+                        }
+                        None if is_server_file(&file.path) => {
+                            pending.insert(file.path.clone());
+                        }
+                        None => {}
+                    }
                 } else if meta.len() != file.size {
                     pending.insert(file.path.clone());
                 } else if let Some(entry) = entry.filter(|e| mode == Mode::Fast && e.size == meta.len() && e.mtime_ms == mtime_ms(meta)) {
@@ -534,6 +550,12 @@ impl Installer<'_> {
     }
     fn commit_locked(&self, s: &mut Shared, file: &FileEntry, temporary: &Path) -> Result<()> {
         let target = destination(&self.root, &file.path, true, &mut s.cache)?;
+        if self.existing.contains(&file.path) && is_server_file(&file.path) {
+            // The download is the channel's config.ini: keep the player's file and give it that server.
+            let player = fs::read(&target.filename).map_err(|e| Error::io(e, target.filename.display()))?;
+            let layer = fs::read(temporary).map_err(|e| Error::io(e, temporary.display()))?;
+            fs::write(temporary, merge_server(&player, &layer)).map_err(|e| Error::io(e, temporary.display()))?;
+        }
         fs::rename(temporary, &target.filename).map_err(|e| Error::io(e, target.filename.display()))?;
         note_created(&mut s.cache, &target.filename);
         let meta = lstat_or_missing(&target.filename)?.ok_or_else(|| Error::new(format!("{} vanished after install.", file.path)).make_local())?;

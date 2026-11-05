@@ -415,19 +415,39 @@ fn rewrite_value(line: &Line, value: &[u8], drop_comment: bool) -> Vec<u8> {
 /// Set one option: the first line keeps its place, repeats and continuations go, a new key joins
 /// the end of its section. A single line the client already reads as `on` is left byte-for-byte.
 fn set_value(ini: &mut Ini, option: &GameOption, on: bool) {
-    let (section, key) = (option.section, option.key);
-    let wanted = key_of(section, key);
-    let value: &[u8] = if on { b"true" } else { b"false" };
-    let matches: Vec<usize> = ini.lines.iter().enumerate().filter(|(_, line)| matches_key(line, &wanted)).map(|(i, _)| i).collect();
-    if matches.len() == 1 && ini.lines[matches[0]].kind == Kind::Key && parse_boolean(client_value(ini, option).as_deref()) == Some(on) {
+    let wanted = key_of(option.section, option.key);
+    let single = ini.lines.iter().filter(|line| matches_key(line, &wanted)).count() == 1;
+    if single && profile_or_inih_line(ini, &wanted) && parse_boolean(client_value(ini, option).as_deref()) == Some(on) {
         return;
     }
-    let profile_first = if option.reader == Reader::Profile { profile_line(ini, section, key) } else { None };
+    set_key(ini, option.section, option.key, if on { b"true" } else { b"false" }, option.reader);
+}
+
+fn profile_or_inih_line(ini: &Ini, wanted: &str) -> bool {
+    ini.lines.iter().find(|line| matches_key(line, wanted)).is_some_and(|line| line.kind == Kind::Key)
+}
+
+/// Set a GetPrivateProfileString key to a text value (the [config] server address), the same way as
+/// set_value: a line that already reads `value` is left byte-for-byte.
+pub fn set_profile_value(ini: &mut Ini, section: &str, key: &str, value: &[u8]) {
+    let wanted = key_of(section, key);
+    let single = ini.lines.iter().filter(|line| matches_key(line, &wanted)).count() == 1;
+    if single && profile_or_inih_line(ini, &wanted) && get_profile_value(ini, section, key).as_deref() == Some(value) {
+        return;
+    }
+    set_key(ini, section, key, value, Reader::Profile);
+}
+
+/// The first line keeps its place, repeats and continuations go, a new key joins the end of its section.
+fn set_key(ini: &mut Ini, section: &str, key: &str, value: &[u8], reader: Reader) {
+    let wanted = key_of(section, key);
+    let matches: Vec<usize> = ini.lines.iter().enumerate().filter(|(_, line)| matches_key(line, &wanted)).map(|(i, _)| i).collect();
+    let profile_first = if reader == Reader::Profile { profile_line(ini, section, key) } else { None };
     if let Some(&first) = matches.first() {
         // The first match is always a key line; for GetPrivateProfileString the line it reads is kept.
         let first = profile_first.unwrap_or(first);
         let rest: Vec<usize> = matches.iter().copied().filter(|&i| i != first).collect();
-        let text = rewrite_value(&ini.lines[first], value, option.reader == Reader::Profile);
+        let text = rewrite_value(&ini.lines[first], value, reader == Reader::Profile);
         ini.lines[first].text = text;
         ini.lines[first].value = value.to_vec();
         for &index in rest.iter().rev() {
@@ -436,7 +456,7 @@ fn set_value(ini: &mut Ini, option: &GameOption, on: bool) {
         return;
     }
     let line = Line {
-        text: format!("{key}={}", String::from_utf8_lossy(value)).into_bytes(),
+        text: [key.as_bytes(), b"=", value].concat(),
         eol: ini.eol.clone(),
         kind: Kind::Key,
         section: section.as_bytes().to_vec(),
