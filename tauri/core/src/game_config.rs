@@ -92,8 +92,12 @@ pub fn read_game_server(install_dir: &str) -> Option<String> {
     if install_dir.is_empty() {
         return None;
     }
-    let text = read_text(Path::new(install_dir)).ok()??;
-    let ini = parse_ini(&text);
+    server_of(&read_text(Path::new(install_dir)).ok()??)
+}
+
+/// `[config] host:port` of config.ini bytes, as read_game_server reads them.
+pub fn server_of(text: &[u8]) -> Option<String> {
+    let ini = parse_ini(text);
     let clean = |v: Vec<u8>| latin1_decode(&v).trim().to_string();
     let host = get_profile_value(&ini, "config", "host").map(clean).filter(|h| !h.is_empty())?;
     Some(match get_profile_value(&ini, "config", "port").map(clean).filter(|p| !p.is_empty()) {
@@ -110,8 +114,9 @@ pub const SERVER_KEYS: [&str; 2] = ["host", "port"];
 /// The player's config.ini with `[config] host` and `port` taken from the channel layer's copy and
 /// everything else (game options, their own keys, comments, line endings) left as it was. A key the
 /// layer doesn't set stays as the player has it. Before this (launcher 1.6.4 and older) an existing
-/// config.ini was never touched, so an install kept the server of whichever channel it was first
-/// installed from: RC after Live still joined Live (owner, 2026-11-05).
+/// config.ini was never touched, so a folder kept the server it was first installed with: the RC
+/// folder still joined the old test server after TEST moved (owner, 2026-11-05). The install flow
+/// skips this when the player changed the server by hand since the launcher last set it.
 pub fn merge_server(player: &[u8], layer: &[u8]) -> Vec<u8> {
     let channel = parse_ini(layer);
     let mut ini = parse_ini(player);

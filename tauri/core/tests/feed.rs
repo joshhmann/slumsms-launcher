@@ -154,24 +154,33 @@ async fn config_ini_takes_its_server_from_the_channel_and_keeps_the_players_opti
     assert_eq!(pending(&dir, &release, Mode::Fast).await, 0, "taken once per layer copy");
     assert_eq!(pending(&dir, &release, Mode::Full).await, 0, "Repair keeps it too");
 
-    // A hand edit on the same channel stays; going back to Live puts Live's server back.
-    fs::write(dir.join("config.ini"), b"[config]\r\nhost=127.0.0.1\r\nport=8489\r\n").unwrap();
-    assert_eq!(pending(&dir, &release, Mode::Full).await, 0);
+    // The channel's server moves (the layer changes): the folder follows it.
     server.put_all(publish("", "1.1", "SlumsMS.exe", &[live("1.1")], &["config.ini"], None).files);
     let release = load(&server, &dir, "").await.unwrap();
     install(&dir, &release, fast()).await.unwrap();
     assert_eq!(read_game_server(dir.to_str().unwrap()).as_deref(), Some("slumsms.asslorde.com:8485"));
+
+    // A server set by hand (a LAN address, say) is the player's: it stays, also when the channel's changes.
+    fs::write(dir.join("config.ini"), b"[config]\r\nhost=192.168.0.164\r\nport=8485\r\n").unwrap();
+    assert_eq!(pending(&dir, &release, Mode::Full).await, 0);
+    let rc2 = Layer::new("client", "rc2", &[("SlumsMS.exe", b"exe"), ("config.ini", b"[config]\r\nhost=192.168.0.111\r\nport=8489\r\nnew=1\r\n")]);
+    server.put_all(publish("", "rc2", "SlumsMS.exe", &[rc2], &["config.ini"], None).files);
+    let release = load(&server, &dir, "").await.unwrap();
+    install(&dir, &release, fast()).await.unwrap();
+    assert_eq!(fs::read(dir.join("config.ini")).unwrap(), b"[config]\r\nhost=192.168.0.164\r\nport=8485\r\n");
+    assert_eq!(pending(&dir, &release, Mode::Fast).await, 0);
 }
 
 #[tokio::test]
 async fn an_install_from_an_older_launcher_takes_the_channel_server_once() {
-    // 1.6.4 and older never recorded config.ini in the install state, so the first check takes the server.
+    // 1.6.4 and older never recorded the server, so the first check takes the channel's, even over a hand edit.
     let server = serve(&[base_layer(), client_layer("1.0", b"exe")], "1.0").await;
     let dir = temp_dir("older");
     let release = load(&server, &dir, "").await.unwrap();
     install(&dir, &release, fast()).await.unwrap();
     let state_path = dir.join(STATE_FILE);
     let mut state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert!(state["files"]["config.ini"]["server"].is_string(), "1.6.5 records the server it left");
     state["files"].as_object_mut().unwrap().remove("config.ini");
     fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
     fs::write(dir.join("config.ini"), b"[config]\r\nhost=old\r\nport=8485\r\n").unwrap();

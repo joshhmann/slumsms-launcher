@@ -282,6 +282,10 @@ pub struct StateEntry {
     #[serde(rename = "mtimeMs")]
     pub mtime_ms: f64,
     pub sha256: String,
+    /// config.ini only: the server ("host:port") the launcher last left in it, so a later change of
+    /// the channel's server can tell its own value from a player's hand edit (game_config::merge_server).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -302,9 +306,10 @@ pub fn read_install_state(root: &str) -> InstallState {
         let size = entry.get("size").and_then(crate::manifest::safe_integer);
         let mtime = entry.get("mtimeMs").and_then(Value::as_f64);
         let sha = entry.get("sha256").and_then(Value::as_str);
+        let server = entry.get("server").and_then(Value::as_str).map(str::to_string);
         if let (Some(size), Some(mtime), Some(sha)) = (size, mtime, sha) {
             if size >= 0 && mtime.is_finite() {
-                files.insert(name.clone(), StateEntry { size: size as u64, mtime_ms: mtime, sha256: sha.to_string() });
+                files.insert(name.clone(), StateEntry { size: size as u64, mtime_ms: mtime, sha256: sha.to_string(), server });
             }
         }
     }

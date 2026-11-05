@@ -5,7 +5,7 @@
 //! stall detection, a disk-space check and resumable first installs.
 
 use crate::error::{Error, Result, ACCESS_KEY_REQUIRED, DISK_FULL};
-use crate::game_config::{merge_server, CONFIG_FILE};
+use crate::game_config::{merge_server, server_of, CONFIG_FILE};
 use crate::fsutil::{destination, digest, free_disk_bytes, installation_root, lstat_or_missing, mtime_ms, note_created, DirCache};
 use crate::http::{network_url, parse_json, read_bytes, request, FeedAccess};
 use crate::manifest::{windows_key, FileEntry, STAGE_PREFIX};
@@ -72,6 +72,8 @@ struct Inspection {
     hashed: usize,
     verified: HashMap<String, StateEntry>,
     existing: HashSet<String>,
+    /// config.ini's state entry from before this check (the server the launcher last left in it).
+    recorded_server: Option<String>,
     root: PathBuf,
     exists: bool,
     kept_bytes: u64,
@@ -86,6 +88,7 @@ fn inspect(root: &str, release: &Release, on_progress: &ProgressFn, mode: Mode, 
     let mut verified = HashMap::new();
     let mut pending = HashSet::new();
     let mut existing = HashSet::new();
+    let mut recorded_server = None;
     let mut to_hash: Vec<(&FileEntry, PathBuf)> = Vec::new();
     let files_total = release.files.len() as u64;
     let report = |message: String, files_done: u64, bytes_done: u64, bytes_total: u64| {
@@ -113,6 +116,7 @@ fn inspect(root: &str, release: &Release, on_progress: &ProgressFn, mode: Mode, 
                             verified.insert(file.path.clone(), entry.clone());
                         }
                         None if is_server_file(&file.path) => {
+                            recorded_server = entry.and_then(|e| e.server.clone());
                             pending.insert(file.path.clone());
                         }
                         None => {}
@@ -154,7 +158,7 @@ fn inspect(root: &str, release: &Release, on_progress: &ProgressFn, mode: Mode, 
                     report(message.clone(), files_done.load(Ordering::SeqCst), done, bytes_total);
                 });
                 let entry = match result {
-                    Ok(Some(d)) if d.sha256 == file.sha256 => Some(StateEntry { size: d.size, mtime_ms: d.mtime_ms, sha256: file.sha256.clone() }),
+                    Ok(Some(d)) if d.sha256 == file.sha256 => Some(StateEntry { size: d.size, mtime_ms: d.mtime_ms, sha256: file.sha256.clone(), server: None }),
                     Ok(_) => None,
                     Err(error) => {
                         failure.lock().unwrap().get_or_insert(error);
@@ -191,6 +195,7 @@ fn inspect(root: &str, release: &Release, on_progress: &ProgressFn, mode: Mode, 
         hashed: to_hash.len(),
         verified,
         existing,
+        recorded_server,
         root: installation.root,
         exists: installation.exists,
         // Bytes already in place and verified (or trusted by size and mtime): what a resumed install keeps.
@@ -513,6 +518,7 @@ struct Installer<'a> {
     release: &'a Release,
     shared: Mutex<Shared>,
     existing: HashSet<String>,
+    recorded_server: Option<String>,
     on_progress: ProgressFn,
     offset: u64,
     files_total: u64,
@@ -550,16 +556,24 @@ impl Installer<'_> {
     }
     fn commit_locked(&self, s: &mut Shared, file: &FileEntry, temporary: &Path) -> Result<()> {
         let target = destination(&self.root, &file.path, true, &mut s.cache)?;
-        if self.existing.contains(&file.path) && is_server_file(&file.path) {
-            // The download is the channel's config.ini: keep the player's file and give it that server.
-            let player = fs::read(&target.filename).map_err(|e| Error::io(e, target.filename.display()))?;
+        let mut server = None;
+        if is_server_file(&file.path) {
             let layer = fs::read(temporary).map_err(|e| Error::io(e, temporary.display()))?;
-            fs::write(temporary, merge_server(&player, &layer)).map_err(|e| Error::io(e, temporary.display()))?;
+            server = server_of(&layer);
+            if self.existing.contains(&file.path) {
+                // The download is the channel's config.ini: keep the player's file and give it that server,
+                // unless they set a server by hand since the launcher last did (none recorded: 1.6.4 or older,
+                // whose folders all take their channel's server once).
+                let player = fs::read(&target.filename).map_err(|e| Error::io(e, target.filename.display()))?;
+                let hand_edited = self.recorded_server.as_ref().is_some_and(|r| server_of(&player).as_ref() != Some(r));
+                let keep = if hand_edited { player } else { merge_server(&player, &layer) };
+                fs::write(temporary, keep).map_err(|e| Error::io(e, temporary.display()))?;
+            }
         }
         fs::rename(temporary, &target.filename).map_err(|e| Error::io(e, target.filename.display()))?;
         note_created(&mut s.cache, &target.filename);
         let meta = lstat_or_missing(&target.filename)?.ok_or_else(|| Error::new(format!("{} vanished after install.", file.path)).make_local())?;
-        s.verified.insert(file.path.clone(), StateEntry { size: meta.len(), mtime_ms: mtime_ms(&meta), sha256: file.sha256.clone() });
+        s.verified.insert(file.path.clone(), StateEntry { size: meta.len(), mtime_ms: mtime_ms(&meta), sha256: file.sha256.clone(), server });
         Ok(())
     }
     /// Install one verified download (or defer it when it replaces an existing file).
@@ -706,6 +720,7 @@ pub async fn install_release(root: &str, release: Arc<Release>, on_progress: Pro
             failure: None,
         }),
         existing: pending.existing,
+        recorded_server: pending.recorded_server,
         on_progress: on_progress.clone(),
         offset: if resumed { pending.kept_bytes } else { 0 },
         files_total: pending.files.len() as u64,
