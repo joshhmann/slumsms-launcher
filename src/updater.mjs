@@ -204,6 +204,9 @@ export function validateManifest(value) {
   }
   if (news) manifest.news = news;
   if (playerOwned) manifest.playerOwned = playerOwned;
+  // The oldest client stamp (slums-build.txt "build") the game server accepts. Only a valid number is kept: a reader
+  // ignores a malformed value (no check), and the publisher refuses to write one (see tools/publish.mjs).
+  if (Number.isSafeInteger(value.minClientBuild) && value.minClientBuild >= 1 && value.minClientBuild <= 99999999) manifest.minClientBuild = value.minClientBuild;
   Object.freeze(manifest);
   validated.add(manifest);
   return manifest;

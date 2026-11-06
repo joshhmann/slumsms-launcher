@@ -354,7 +354,8 @@ async function packsReference(versionDirectory, name, version, manifest, manifes
  * override order (later layers win), with each layer's packs when it has them (packs: false skips).
  * Nothing else is changed; publish layers (and packs) first.
  */
-export async function publishLayeredRelease({ output, version, executable = DEFAULT_EXECUTABLE, args = [], news, playerOwned = DEFAULT_PLAYER_OWNED, layers, packs = true } = {}) {
+export async function publishLayeredRelease({ output, version, executable = DEFAULT_EXECUTABLE, args = [], news, playerOwned = DEFAULT_PLAYER_OWNED, layers, packs = true, minClientBuild } = {}) {
+  if (minClientBuild !== undefined && !(Number.isSafeInteger(minClientBuild) && minClientBuild >= 1 && minClientBuild <= 99999999)) throw new Error(`--min-client-build must be a whole number from 1 to 99999999, got ${minClientBuild}.`);
   if (typeof output !== 'string' || !output.trim()) throw new Error('An output directory is required.');
   if (!Array.isArray(layers) || !layers.length) throw new Error('Name at least one published layer (NAME@VERSION).');
   const destination = path.resolve(output);
@@ -379,7 +380,8 @@ export async function publishLayeredRelease({ output, version, executable = DEFA
       parts.push({ name, files: manifest.files });
     }
     const merged = mergeLayers(parts);
-    const top = validateManifest({ schemaVersion: 2, version, launch: { executable, args }, news, playerOwned, layers: references });
+    const top = validateManifest({ schemaVersion: 2, version, launch: { executable, args }, news, playerOwned, layers: references, minClientBuild });
+    if (top.minClientBuild !== minClientBuild) throw new Error('minClientBuild did not survive manifest validation; nothing was published.');
     if (!merged.some((file) => file.path === top.launch.executable)) throw new Error(`Launch executable ${top.launch.executable} is not in any listed layer.`);
     for (const entry of await fs.readdir(destination)) {
       if (entry.normalize('NFC').toUpperCase() === 'MANIFEST.JSON' && entry !== 'manifest.json') throw new Error(`Output contains a Windows alias for manifest.json: ${entry}`);
@@ -545,6 +547,7 @@ const usage = `Usage:
   Point the release at published layers (writes OUT/manifest.json last; later layers override earlier):
     node tools/publish.mjs --release VERSION --out DIR --use base@BASE_VERSION --use client@CLIENT_VERSION
       [--exe SlumsMS.exe] [--arg VALUE ...] [--news FILE.json] [--player-owned PATH ...] [--no-player-owned] [--no-packs]
+      [--min-client-build N]   (the oldest slums-build.txt build the game server accepts: the server's MIN_CLIENT_BUILD; omit = launchers don't check)
   Publish a signed Tauri launcher exe to a channel folder (OUT/tauri/VERSION/, then OUT/tauri/launcher.json):
     node tools/publish.mjs --tauri-launcher EXE --signature EXE.sig --version X.Y.Z --base-url https://HOST/[launcher-test/] --out DIR [--notes TEXT]
   Publish a launcher build to the launcher channel (OUT/launcher/PLATFORM/VERSION/, then OUT/launcher.json):
@@ -557,7 +560,7 @@ async function cli(argv) {
   const options = { args: [], use: [], playerOwned: [] };
   const names = new Map([['--source', 'source'], ['--out', 'output'], ['--version', 'version'], ['--exe', 'executable'], ['--news', 'news'],
     ['--layer', 'layer'], ['--release', 'release'], ['--launcher', 'launcher'], ['--platform', 'platform'], ['--packs', 'packs'], ['--pack-size', 'packSize'],
-    ['--tauri-launcher', 'tauriLauncher'], ['--signature', 'signature'], ['--base-url', 'baseUrl'], ['--notes', 'notes']]);
+    ['--tauri-launcher', 'tauriLauncher'], ['--signature', 'signature'], ['--base-url', 'baseUrl'], ['--notes', 'notes'], ['--min-client-build', 'minClientBuild']]);
   const repeated = new Map([['--arg', 'args'], ['--use', 'use'], ['--player-owned', 'playerOwned']]);
   let noPlayerOwned = false;
   let allowNoAccessKey = false;
@@ -580,6 +583,11 @@ async function cli(argv) {
   const require = (...keys) => {
     for (const key of keys) if (!Object.hasOwn(options, key)) throw new Error(`Missing required option: ${key}\n${usage}`);
   };
+  if (Object.hasOwn(options, 'minClientBuild')) {
+    if (!Object.hasOwn(options, 'release')) throw new Error('--min-client-build requires --release.');
+    if (!/^[1-9][0-9]{0,7}$/.test(options.minClientBuild)) throw new Error(`--min-client-build must be a whole number from 1 to 99999999, got ${options.minClientBuild}.`);
+    options.minClientBuild = Number(options.minClientBuild);
+  }
   if (Object.hasOwn(options, 'news')) {
     try { options.news = JSON.parse(await fs.readFile(options.news, 'utf8')); } catch (error) {
       throw new Error(`Cannot read news file ${options.news}: ${error.message}`);
@@ -644,7 +652,7 @@ async function cli(argv) {
     });
     const playerOwned = noPlayerOwned ? [] : options.playerOwned.length ? options.playerOwned : DEFAULT_PLAYER_OWNED;
     const manifest = await publishLayeredRelease({ output: options.output, version: options.release, executable: options.executable, args: options.args,
-      news: options.news, playerOwned, layers, packs: !noPacks });
+      news: options.news, playerOwned, layers, packs: !noPacks, minClientBuild: options.minClientBuild });
     console.log(`Published release ${manifest.version}: ${manifest.layers.map((layer) => `${layer.name}@${layer.version}${layer.packs ? ' (packs)' : ''}`).join(' + ')} -> ${path.join(path.resolve(options.output), 'manifest.json')}`);
     return;
   }
