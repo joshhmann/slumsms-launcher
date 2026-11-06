@@ -7,9 +7,12 @@
 //! build=10600
 //! ```
 //!
-//! `build` is major*10000+minor*100+patch. Clients before 1.6.0 have no file; the launcher then
-//! falls back to the installed record's `client` layer version. Reading it never fails: anything
-//! missing, unreadable or malformed is simply "unknown", so it can never block Play.
+//! `build` is the client's own stamp (cmake/BuildStamp.cmake), the number the game server's
+//! MIN_CLIENT_BUILD and the manifest's `minClientBuild` are written in. It is the only build number:
+//! the launcher never works one out from a release string (1.6.4 is not 10604; the stamp says 10740).
+//! A file without a valid `build` line is "unknown", and so are clients before 1.6.0 (no file).
+//! Reading it never fails: anything missing, unreadable or malformed is simply "unknown", so it can
+//! never block Play.
 
 use serde::Serialize;
 
@@ -20,33 +23,14 @@ const MAX_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ClientBuild {
-    /// "1.6.0"
+    /// "1.6.0": a label; empty when the file has no `release` line
     pub release: String,
     /// 10600
     pub build: u32,
 }
 
-/// "1.6.0" -> 10600. Each part must be 0-99 (MAJOR may be larger), digits only.
-pub fn build_number(release: &str) -> Option<u32> {
-    let parts: Vec<&str> = release.split('.').collect();
-    if parts.len() != 3 || parts.iter().any(|p| p.is_empty() || p.len() > 4 || !p.bytes().all(|b| b.is_ascii_digit())) {
-        return None;
-    }
-    let [major, minor, patch] = [parts[0], parts[1], parts[2]].map(|p| p.parse::<u32>().unwrap_or(u32::MAX));
-    if major > 9999 || minor > 99 || patch > 99 {
-        return None;
-    }
-    Some(major * 10_000 + minor * 100 + patch)
-}
-
-/// 10600 -> "1.6.0".
-pub fn release_of(build: u32) -> String {
-    format!("{}.{}.{}", build / 10_000, build / 100 % 100, build % 100)
-}
-
 /// Parse the file's text. Tolerates \r\n, blank lines, surrounding spaces, a UTF-8 BOM and extra
-/// keys. Needs at least one of `release` or `build`; when only one is present the other is derived.
-/// When both are present `build` wins for comparisons and `release` is shown as written.
+/// keys. Needs a valid `build` line; `release` is only a label (empty when the file has none).
 pub fn parse_build_file(text: &str) -> Option<ClientBuild> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut release: Option<String> = None;
@@ -60,11 +44,16 @@ pub fn parse_build_file(text: &str) -> Option<ClientBuild> {
             _ => {}
         }
     }
-    match (release, build) {
-        (Some(release), Some(build)) => Some(ClientBuild { release, build }),
-        (Some(release), None) => build_number(&release).map(|build| ClientBuild { release, build }),
-        (None, Some(build)) => Some(ClientBuild { release: release_of(build), build }),
-        (None, None) => None,
+    build.map(|build| ClientBuild { release: release.unwrap_or_default(), build })
+}
+
+/// The manifest's `minClientBuild` against the installed client's stamp: Some((have, need)) only when both
+/// are known and the client is lower. A manifest without the field never blocks (leaving it out is the kill
+/// switch), and a missing or unreadable stamp warns elsewhere but never blocks.
+pub fn too_old(installed: Option<u32>, min: Option<u32>) -> Option<(u32, u32)> {
+    match (installed, min) {
+        (Some(have), Some(need)) if have < need => Some((have, need)),
+        _ => None,
     }
 }
 
@@ -101,11 +90,22 @@ mod tests {
     }
 
     #[test]
-    fn derives_the_missing_half() {
-        assert_eq!(parse_build_file("release=1.6.2\n"), cb("1.6.2", 10602));
-        assert_eq!(parse_build_file("build=11203\n"), cb("1.12.3", 11203));
-        assert_eq!(parse_build_file("release=1.6.0-rc1\n"), None, "no build and a release that is not MAJOR.MINOR.PATCH");
+    fn the_build_line_is_the_only_number_and_is_never_worked_out_from_the_release() {
+        assert_eq!(parse_build_file("release=1.6.2\n"), None, "1.6.2 would be 10602, but the stamp says 10720: unknown, not guessed");
+        assert_eq!(parse_build_file("release=1.6.4\n"), None);
+        assert_eq!(parse_build_file("build=10740\n"), cb("", 10740), "no release label, and none is made up");
+        assert_eq!(parse_build_file("release=1.6.4\nbuild=10740"), cb("1.6.4", 10740), "release 1.6.4, stamp 10740: the stamp wins");
         assert_eq!(parse_build_file("release=1.6.0-rc1\nbuild=10600"), cb("1.6.0-rc1", 10600));
+    }
+
+    #[test]
+    fn too_old_only_when_both_numbers_are_known_and_the_client_is_lower() {
+        assert_eq!(too_old(Some(10720), Some(10740)), Some((10720, 10740)));
+        assert_eq!(too_old(Some(10740), Some(10740)), None, "equal is fine");
+        assert_eq!(too_old(Some(10741), Some(10740)), None);
+        assert_eq!(too_old(None, Some(10740)), None, "no readable stamp: warn, never block");
+        assert_eq!(too_old(Some(10720), None), None, "no minClientBuild in the manifest: the kill switch");
+        assert_eq!(too_old(None, None), None);
     }
 
     #[test]
@@ -113,19 +113,8 @@ mod tests {
         for text in ["", "\n\n", "hello", "build=abc", "build=-5", "build=0", "build=1e5", "release=", "build=12345678901", "release=1.200.0"] {
             assert_eq!(parse_build_file(text), None, "{text:?}");
         }
-        // A bad build with a good release falls back to the release.
-        assert_eq!(parse_build_file("release=1.6.0\nbuild=oops"), cb("1.6.0", 10600));
-    }
-
-    #[test]
-    fn build_numbers_round_trip() {
-        assert_eq!(build_number("1.5.4"), Some(10504));
-        assert_eq!(build_number("1.6.0"), Some(10600));
-        assert_eq!(build_number("2.0.10"), Some(20010));
-        assert_eq!(build_number("1.6"), None);
-        assert_eq!(build_number("v83-2026.10.19"), None);
-        assert_eq!(release_of(10600), "1.6.0");
-        assert_eq!(release_of(20010), "2.0.10");
+        // A bad build is unknown even next to a good release: the release is a label, not a number.
+        assert_eq!(parse_build_file("release=1.6.0\nbuild=oops"), None);
     }
 
     #[test]

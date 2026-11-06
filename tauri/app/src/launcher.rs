@@ -731,6 +731,22 @@ impl Launcher {
                         }
                     }
                 };
+                // P1-L1: after the update, a client still below the server's minimum build is not started (the server
+                // would refuse it anyway). Unknown on either side never blocks: no `minClientBuild` is the kill switch.
+                let min = match &offered {
+                    Available::Ok { min_client_build, .. } => *min_client_build,
+                    _ => None,
+                };
+                let stamp = read_client_build(&e.install_dir).map(|b| b.build);
+                if let Some((have, need)) = slums_core::client_build::too_old(stamp, min) {
+                    self.log(&format!("Play: client build {have} is below the server's minimum {need}; not starting it."));
+                    return Err(slums_core::Error::new(format!(
+                        "Your game client is build {have}, but the server needs build {need} or newer, and the update did not bring it. Use Repair files in Settings, or ask staff."
+                    )));
+                }
+                if stamp.is_none() && min.is_some() {
+                    self.log("Play: no readable slums-build.txt, so the server's minimum build can't be checked; starting the client.");
+                }
                 (release.launch.clone(), false)
             }
         };

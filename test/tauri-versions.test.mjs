@@ -1,31 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { versionStatus, versionFooter, clientVersion, clientUpdateNote, buildNumber, launcherLabel, actionHelp } from '../tauri/ui/version-status.mjs';
+import { versionStatus, versionFooter, clientVersion, clientUpdateNote, launcherLabel, actionHelp } from '../tauri/ui/version-status.mjs';
 
 const installed = (version, extra = {}) => ({ status: 'installed', version, layers: [{ name: 'base', version: 'v83-2026.10.19' }, { name: 'client', version: '1.5.0' }], ...extra });
 const available = (version, extra = {}) => ({ status: 'ok', version, layers: [], ...extra });
 const file = (release, build) => ({ clientBuild: { release, build } });
-
-test('build numbers are major*10000+minor*100+patch', () => {
-  assert.equal(buildNumber('1.6.0'), 10600);
-  assert.equal(buildNumber('1.5.4'), 10504);
-  assert.equal(buildNumber('2.0.10'), 20010);
-  for (const bad of ['v83-2026.10.19', '2026.10.19-1', '1.6', '1.6.0-rc1', '', undefined, 10600]) assert.ok(Number.isNaN(buildNumber(bad)), String(bad));
-});
 
 test('the client comes from slums-build.txt, then the client layer, else Unknown', () => {
   assert.deepEqual(clientVersion(installed('1.6.0', file('1.6.0', 10600))), { label: '1.6.0 (build 10600)', title: 'From slums-build.txt in the game folder.', build: 10600, source: 'file' });
   // Clients before 1.6.0 have no file: the installed record's client layer.
   const layer = clientVersion(installed('1.5.3'));
   assert.equal(layer.label, '1.5.0');
-  assert.equal(layer.build, 10500);
+  assert.ok(Number.isNaN(layer.build), 'a release string is never turned into a build number (P1-L1)');
   assert.equal(layer.source, 'layer');
+  assert.equal(clientVersion({ status: 'installed', version: '1', layers: 'nope', clientBuild: { release: '', build: 10600 } }).label, 'build 10600', 'a file with a build and no release is labelled by its build');
   // A client layer with a date-style version is shown but its build is unknown.
   assert.ok(Number.isNaN(clientVersion({ status: 'installed', version: 'x', layers: [{ name: 'client', version: '2026.10.19-1' }] }).build));
   // An unverified folder can still have the file.
   assert.equal(clientVersion({ status: 'unknown', ...file('1.6.0', 10600) }).label, '1.6.0 (build 10600)');
   for (const nothing of [undefined, null, { status: 'unknown' }, { status: 'not-installed', ...file('1.6.0', 10600) }, { status: 'installed', version: '1', layers: [{ name: 'base', version: 'v83' }] },
-    { status: 'installed', version: '1', layers: 'nope', clientBuild: { release: '', build: 10600 } }, { status: 'unknown', clientBuild: { release: '1.6.0', build: '10600' } }]) {
+    { status: 'unknown', clientBuild: { release: '1.6.0', build: '10600' } }]) {
     assert.equal(clientVersion(nothing).label, 'Unknown', JSON.stringify(nothing));
   }
 });
@@ -33,7 +27,9 @@ test('the client comes from slums-build.txt, then the client layer, else Unknown
 test('minClientBuild: a note only when the server names one and the client is known to be older', () => {
   const note = 'Client update needed: the server needs build 10600 or newer';
   assert.equal(clientUpdateNote(installed('1.5.3', file('1.5.9', 10509)), available('1.6.0', { minClientBuild: 10600 })), note);
-  assert.equal(clientUpdateNote(installed('1.5.3'), available('1.6.0', { minClientBuild: 10600 })), note, 'client layer 1.5.0 is build 10500');
+  assert.equal(clientUpdateNote(installed('1.5.3'), available('1.6.0', { minClientBuild: 10600 })), '', 'client layer 1.5.0 only: no build number, so no warning and no block');
+  assert.equal(clientUpdateNote(installed('1.6.4', file('', 10720)), available('1.6.4', { minClientBuild: 10740 })), 'Client update needed: the server needs build 10740 or newer', 'the stamp is the number, and a file without a release still counts');
+  assert.equal(clientUpdateNote(installed('1.6.4', file('1.6.4', 10740)), available('1.6.4', { minClientBuild: 10740 })), '', 'release 1.6.4 with stamp 10740 is current; 10604 is never used');
   assert.equal(clientUpdateNote(installed('1.6.0', file('1.6.0', 10600)), available('1.6.0', { minClientBuild: 10600 })), '', 'equal is fine');
   assert.equal(clientUpdateNote(installed('1.6.1', file('1.6.1', 10601)), available('1.6.1', { minClientBuild: 10600 })), '');
   assert.equal(clientUpdateNote(installed('1.5.3', file('1.5.3', 10503)), available('1.6.0')), '', 'absent field = no check');

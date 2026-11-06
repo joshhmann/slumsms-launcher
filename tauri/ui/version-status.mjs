@@ -20,29 +20,25 @@ const layerText = (layers) => (Array.isArray(layers) ? layers : [])
 
 const isBuild = (n) => Number.isSafeInteger(n) && n > 0;
 
-/** "1.6.0" -> 10600 (major*10000+minor*100+patch); NaN for anything else ("2026.10.19-1", "v83"). */
-export function buildNumber(release) {
-  const match = /^(\d{1,4})\.(\d{1,2})\.(\d{1,2})$/u.exec(typeof release === 'string' ? release.trim() : '');
-  return match ? Number(match[1]) * 10000 + Number(match[2]) * 100 + Number(match[3]) : NaN;
-}
-
 /**
  * The installed client: { label, title, build, source }.
- *   source 'file'  - slums-build.txt: label "1.6.0 (build 10600)".
- *   source 'layer' - no file (clients before 1.6.0): the installed record's client layer version;
- *                    build is known only when that version is MAJOR.MINOR.PATCH.
+ *   source 'file'  - slums-build.txt: label "1.6.0 (build 10600)", or "build 10600" when the file has no release.
+ *   source 'layer' - no file (clients before 1.6.0): the installed record's client layer version, as a label
+ *                    only. Its build is unknown (NaN): a release string is never turned into a build number,
+ *                    because the client's own stamp is the one scheme (1.6.4 is build 10740, not 10604).
  *   source 'none'  - label "Unknown", build NaN.
  * Never throws: a missing or odd value is just "Unknown".
  */
 export function clientVersion(installed) {
   const file = installed && installed.status !== 'not-installed' ? installed.clientBuild : undefined;
-  if (file && typeof file.release === 'string' && file.release && isBuild(file.build)) {
-    return { label: `${file.release} (build ${file.build})`, title: 'From slums-build.txt in the game folder.', build: file.build, source: 'file' };
+  if (file && isBuild(file.build)) {
+    const release = typeof file.release === 'string' ? file.release : '';
+    return { label: release ? `${release} (build ${file.build})` : `build ${file.build}`, title: 'From slums-build.txt in the game folder.', build: file.build, source: 'file' };
   }
   const layer = installed?.status === 'installed' && Array.isArray(installed.layers)
     ? installed.layers.find((entry) => entry && entry.name === 'client' && typeof entry.version === 'string' && entry.version)
     : undefined;
-  if (layer) return { label: layer.version, title: 'Client layer of the installed release (this client has no build file).', build: buildNumber(layer.version), source: 'layer' };
+  if (layer) return { label: layer.version, title: 'Client layer of the installed release (this client has no build file).', build: NaN, source: 'layer' };
   return { label: 'Unknown', title: '', build: NaN, source: 'none' };
 }
 
