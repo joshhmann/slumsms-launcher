@@ -15,7 +15,7 @@ use url::Url;
 
 pub const LIVE_SITE: &str = "https://theslumsms.asslorde.com";
 /// The TEST copy of the site (tools/site/test164 in SlumsMS-site): plain HTTP on the LAN, for Test and RC.
-pub const TEST_SITE: &str = "http://192.168.0.164:8192";
+pub const TEST_SITE: &str = "http://192.168.0.111:8192";
 const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BODY: usize = 64 * 1024;
 const MAX_TOKEN: usize = 4096;
@@ -415,14 +415,14 @@ mod tests {
     #[test]
     fn live_signs_in_to_the_live_site_and_test_and_rc_to_the_test_site() {
         assert_eq!(site_for(Channel::Live), "https://theslumsms.asslorde.com");
-        assert_eq!(site_for(Channel::Test), "http://192.168.0.164:8192");
-        assert_eq!(site_for(Channel::Rc), "http://192.168.0.164:8192");
+        assert_eq!(site_for(Channel::Test), "http://192.168.0.111:8192");
+        assert_eq!(site_for(Channel::Rc), "http://192.168.0.111:8192");
         assert_eq!(forgot_url(LIVE_SITE).as_deref(), Some("https://theslumsms.asslorde.com/forgot/"));
-        assert_eq!(forgot_url(TEST_SITE).as_deref(), Some("http://192.168.0.164:8192/forgot/"));
+        assert_eq!(forgot_url(TEST_SITE).as_deref(), Some("http://192.168.0.111:8192/forgot/"));
         assert_eq!(join_url(LIVE_SITE).as_deref(), Some("https://theslumsms.asslorde.com/join/"));
-        assert_eq!(join_url(TEST_SITE).as_deref(), Some("http://192.168.0.164:8192/join/"));
+        assert_eq!(join_url(TEST_SITE).as_deref(), Some("http://192.168.0.111:8192/join/"));
         assert_eq!(site_tag(LIVE_SITE), "live");
-        assert_eq!(site_tag("http://192.168.0.164:8192/"), "test");
+        assert_eq!(site_tag("http://192.168.0.111:8192/"), "test");
         assert_eq!(site_tag("http://127.0.0.1:9"), "dev");
     }
 
@@ -431,8 +431,9 @@ mod tests {
         assert!(site_url(LIVE_SITE).is_ok());
         assert!(site_url(TEST_SITE).is_ok());
         assert!(site_url("http://127.0.0.1:8094").is_ok());
-        assert!(site_url("http://192.168.0.164:8193").is_err(), "another port on the TEST box");
+        assert!(site_url("http://192.168.0.111:8193").is_err(), "another port on the TEST box");
         assert!(site_url("http://192.168.0.165:8192").is_err());
+        assert!(site_url("http://192.168.0.164:8192").is_err(), "the old TEST box (P2-7: TEST site moved to .111)");
         assert!(site_url("http://theslumsms.asslorde.com").is_err(), "the live site never over plain HTTP");
         assert!(site_url("https://u:p@theslumsms.asslorde.com").is_err());
         assert!(site_url("not a url").is_err());

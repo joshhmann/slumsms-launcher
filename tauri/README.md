@@ -143,7 +143,7 @@ What is new:
   "signed in as <character>" or a Sign in link. The SIGN IN dialog has two ways in, both through the site's login
   service (`docs/site/LOGIN.md` in SlumsMS-site): game username and password, or a new account with an invite
   code. Live signs in to
-  `https://theslumsms.asslorde.com`; Test and RC sign in to the TEST site `http://192.168.0.164:8192` only (the one
+  `https://theslumsms.asslorde.com`; Test and RC sign in to the TEST site `http://192.168.0.111:8192` only (the one
   plain-HTTP origin allowed, besides loopback). The launcher keeps only the site's session token, never a password:
   the form clears the password field when it sends, and the core wipes its copy. It asks `/api/login/me` on start
   and every 10 minutes, and deletes a session the site no longer accepts (expired, or the account in
